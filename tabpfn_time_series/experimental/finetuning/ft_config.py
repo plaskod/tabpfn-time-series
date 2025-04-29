@@ -1,0 +1,57 @@
+from dataclasses import dataclass, field, asdict
+from typing import List, Tuple, Dict, Any
+import json
+
+
+@dataclass
+class FinetuneConfig:
+    model: 'FinetuneConfig.Model' = field(default_factory=lambda: FinetuneConfig.Model())
+    optimization: 'FinetuneConfig.Optimization' = field(default_factory=lambda: FinetuneConfig.Optimization())
+    train_dataset: 'FinetuneConfig.TrainDataset' = field(default_factory=lambda: FinetuneConfig.TrainDataset())
+    test_dataset: 'FinetuneConfig.TestDataset' = field(default_factory=lambda: FinetuneConfig.TestDataset())
+
+    @dataclass
+    class Model:
+        ignore_pretraining_limits: bool = True
+        n_estimators: int = 8
+        random_state: int = 0
+        differentiable_input: bool = False
+
+    @dataclass
+    class Optimization:
+        n_epochs: int = 5
+        lr: float = 1e-5
+        # space: str = "raw_label_space"
+        space: str = "preprocessed"
+        gradient_accumulation_steps: int = 16
+
+    @dataclass
+    class TrainDataset:
+        dataset_repo_name: str = "liamsbhoo/GiftEvalPretrain"
+        dataset_names: Tuple[str, ...] = (
+            "bdg-2_panther",
+            "bdg-2_fox",
+            "bdg-2_rat",
+        )
+        max_context_length: int = 1000
+
+    @dataclass
+    class TestDataset:
+        dataset_repo_name: str = "liamsbhoo/GiftEvalPretrain"
+        dataset_names: Tuple[str, ...] = (
+            "bdg-2_bear",
+        )
+        max_context_length: int = 500
+        
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert config to dictionary for JSON serialization."""
+        return {
+            "model": asdict(self.model),
+            "optimization": asdict(self.optimization),
+            "train_dataset": asdict(self.train_dataset),
+            "test_dataset": asdict(self.test_dataset),
+        }
+        
+    def to_json(self) -> str:
+        """Convert config to JSON string."""
+        return json.dumps(self.to_dict(), indent=2)

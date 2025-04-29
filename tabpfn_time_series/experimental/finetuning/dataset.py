@@ -1,3 +1,5 @@
+import os
+import time
 from typing import Tuple, TypeAlias
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -53,13 +55,16 @@ class TabPFNTimeSeriesPretrainDataset(Dataset):
         dataset_repo_name: str = "liamsbhoo/GiftEvalPretrainMini",
         dataset_names: list[str] = None,
         time_series_pretrain_config: TimeSeriesPretrainConfig = TimeSeriesPretrainConfig(),
-        return_train_test_separately: bool = False,
+        max_context_length: int = 4096,
+        feature_config: dict = DEFAULT_FEATURE_CONFIG,
         hf_cache_dir: str = None,
     ):
-        self.return_train_test_separately = return_train_test_separately
         self.dataset_repo_name = dataset_repo_name
         self.dataset_names = dataset_names
+        self.max_context_length = max_context_length
+        self.feature_config = feature_config
 
+        load_data_start_time = time.time()
         # If no dataset names provided, load the entire repository
         if self.dataset_names is None:
             logger.info(f"Loading all datasets from {dataset_repo_name}")
@@ -78,7 +83,8 @@ class TabPFNTimeSeriesPretrainDataset(Dataset):
             for name in self.dataset_names:
                 self.datasets.append(
                     load_dataset(
-                        dataset_repo_name, name, split="train", cache_dir=hf_cache_dir
+                        dataset_repo_name, name, split="train",
+                        cache_dir=hf_cache_dir,
                     )
                 )
 
@@ -88,13 +94,14 @@ class TabPFNTimeSeriesPretrainDataset(Dataset):
                     self.dataset_names[i] if self.dataset_names else f"dataset_{i}"
                 )
                 logger.info(f"  - {dataset_name}: {len(dataset)} samples")
+        load_data_end_time = time.time()
+        logger.info(f"Time taken to load data: {int(load_data_end_time - load_data_start_time)} seconds")
 
-        self.ts_pretrain_config = time_series_pretrain_config
         self.ts_preprocessor = TimeSeriesPreprocessor(
-            max_context_length=self.ts_pretrain_config.max_context_length,
+            max_context_length=self.max_context_length,
         )
         self.feature_transformer = self._create_feature_transformer(
-            self.ts_pretrain_config.feature_config
+            self.feature_config
         )
 
         # Calculate total length across all datasets
@@ -109,7 +116,7 @@ class TabPFNTimeSeriesPretrainDataset(Dataset):
         # Total length is the sum of all dataset lengths
         return self.dataset_cumulative_lengths[-1]
 
-    def __getitem__(self, index: int):
+    def __getitem__(self, index: int) -> Tuple[XType, YType]:
         if index < 0 or index >= len(self):
             raise IndexError(
                 f"Index {index} is out of bounds for dataset of size {len(self)}"
@@ -134,29 +141,20 @@ class TabPFNTimeSeriesPretrainDataset(Dataset):
                 f"Target is not univariate for dataset: {self.dataset_names[dataset_idx]}"
             )
 
-        X_train, y_train, X_test, y_test = self.time_series_to_feat_tabular_dataset(
+        X, y = self.time_series_to_feat_tabular_dataset(
             start_timestamp=sample["start"],
             freq=sample["freq"],
             target=sample["target"],
         )
 
-        # TODO: fix this properly
-        # doing the split because the featurization code expects the train/test to be separate
-        if self.return_train_test_separately:
-            raise NotImplementedError("Train/test split is not implemented yet")
-            # return X_train, y_train, X_test, y_test
-        else:
-            X = pd.concat([X_train, X_test], ignore_index=True)
-            y = pd.concat([y_train, y_test], ignore_index=True)
-
-            return X, y
+        return X, y
 
     def time_series_to_feat_tabular_dataset(
         self,
         start_timestamp: datetime,
         freq: str,
         target: list[float],
-    ) -> Tuple[XTrainType, YTrainType, XTestType, YTestType]:
+    ) -> Tuple[XType, YType]:
         """
         Convert a raw time series into train/test tabular datasets with features.
 
@@ -166,10 +164,8 @@ class TabPFNTimeSeriesPretrainDataset(Dataset):
             target: List of target values
 
         Returns:
-            X_train: Feature matrix for training
-            y_train: Target values for training
-            X_test: Feature matrix for testing
-            y_test: Target values for testing
+            X: Feature matrix
+            y: Target values
         """
         # Create timestamp index for the time series
         timestamp = pd.date_range(start=start_timestamp, periods=len(target), freq=freq)
@@ -183,34 +179,12 @@ class TabPFNTimeSeriesPretrainDataset(Dataset):
             id_column="dummy_item_id",
         )
         preprocessed_tsdf = self.ts_preprocessor.forward(tsdf)
+        feat_tsdf, _ = self.feature_transformer.transform(preprocessed_tsdf)
 
-        # Split into train and test sets
-        prediction_length = self.ts_pretrain_config.prediction_length
-        train_tsdf = preprocessed_tsdf.slice_by_timestep(None, -prediction_length)
-        test_tsdf_w_target = preprocessed_tsdf.slice_by_timestep(
-            -prediction_length, None
-        )
+        X = feat_tsdf.to_data_frame().drop(columns=["target"])
+        y = feat_tsdf.to_data_frame()["target"]
 
-        # Create test set without target values for feature generation
-        test_tsdf_without_target = test_tsdf_w_target.copy()
-        test_tsdf_without_target["target"] = np.nan
-
-        # Generate features for both train and test sets
-        train_feat_tsdf, test_feat_tsdf = self.feature_transformer.transform(
-            train_tsdf, test_tsdf_without_target
-        )
-
-        # Convert TimeSeriesDataFrame to regular tabular format
-        train_table = self._convert_tsdf_to_tabular(train_feat_tsdf)
-        test_table = self._convert_tsdf_to_tabular(test_feat_tsdf)
-
-        # Extract features and targets
-        X_train = train_table.drop(columns=["target"])
-        y_train = train_table["target"]
-        X_test = test_table.drop(columns=["target"])
-        y_test = test_tsdf_w_target["target"]
-
-        return X_train, y_train, X_test, y_test
+        return X, y
 
     @staticmethod
     def _convert_tsdf_to_tabular(
