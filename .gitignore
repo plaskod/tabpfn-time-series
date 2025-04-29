@@ -2,6 +2,7 @@
 *.DS_Store
 .env
 gift_eval/data
+gift_eval/pretrain_data
 gift_eval/results
 wandb
 results
@@ -10,3 +11,5 @@ archive/
 logs/
 lightning_logs/
 catboost_info/
+
+.vscode/

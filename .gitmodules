@@ -1,0 +1,3 @@
+[submodule "tabpfn_time_series/experimental/finetuning/tabpfn_private"]
+	path = tabpfn_time_series/experimental/finetuning/tabpfn_private
+	url = git@github.com:PriorLabs/TabPFN-private.git
