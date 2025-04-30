@@ -3,11 +3,9 @@
 Script to submit mini-ft-lightning.py as an SBATCH job using submitit.
 """
 
-import os
 import argparse
 import submitit
 from datetime import datetime
-import sys
 from pathlib import Path
 
 SCRIPT_PATH = Path(__file__).parent / "mini-ft-lightning.py"
@@ -23,6 +21,7 @@ def parse_args():
     parser.add_argument("--cpus", type=int, default=6, help="Number of CPUs to request")
     parser.add_argument("--wandb_project", type=str, default="tabpfn-ts-ft", help="Weights & Biases project name")
     parser.add_argument("--wandb_entity", type=str, default=None, help="Weights & Biases entity name")
+    parser.add_argument("--wandb_tags", type=str, nargs="+", default=None, help="Tags for the W&B run")
     parser.add_argument("--run_name", type=str, default=None, help="Name for the W&B run")
     parser.add_argument("--max_epochs", type=int, default=None, help="Maximum number of epochs to train")
     return parser.parse_args()
@@ -55,6 +54,9 @@ class TrainingJob:
         
         if self.args.max_epochs:
             cmd.extend(["--max_epochs", str(self.args.max_epochs)])
+        
+        if self.args.wandb_tags:
+            cmd.extend(["--tags"] + self.args.wandb_tags)
         
         # Execute the command
         import subprocess

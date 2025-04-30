@@ -269,18 +269,6 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
         )
 
 
-def parse_args():
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description="Fine-tuning script for TabPFN Time Series models")
-    parser.add_argument("--device", type=str, default="cuda", help="Device to use for training (cuda or cpu)")
-    parser.add_argument("--wandb_project", type=str, default="tabpfn-ts-ft", help="Weights & Biases project name")
-    parser.add_argument("--wandb_entity", type=str, default=None, help="Weights & Biases entity name")
-    parser.add_argument("--max_epochs", type=int, default=None, help="Maximum number of epochs to train")
-    parser.add_argument("--run_name", type=str, default=None, help="Custom name for the W&B run")
-    parser.add_argument("--debug", action="store_true", help="Run in debug mode")
-    return parser.parse_args()
-
-
 def prepare_datasets(train_dataset, test_dataset, debug_mode=False):
     """Prepare and potentially truncate datasets based on debug mode."""
     # Load all time series datasets
@@ -372,6 +360,18 @@ DEBUG_MESSAGE = \
 #########################################################
 """
 
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description="Fine-tuning script for TabPFN Time Series models")
+    parser.add_argument("--device", type=str, default="cuda", help="Device to use for training (cuda or cpu)")
+    parser.add_argument("--wandb_project", type=str, default="tabpfn-ts-ft", help="Weights & Biases project name")
+    parser.add_argument("--wandb_entity", type=str, default=None, help="Weights & Biases entity name")
+    parser.add_argument("--max_epochs", type=int, default=None, help="Maximum number of epochs to train")
+    parser.add_argument("--run_name", type=str, default=None, help="Custom name for the W&B run")
+    parser.add_argument("--debug", action="store_true", help="Run in debug mode")
+    parser.add_argument("--tags", type=str, nargs="+", default=None, help="Tags for the W&B run")
+    return parser.parse_args()
+
 
 def main():
     """Main entry point for the fine-tuning script."""
@@ -443,13 +443,18 @@ def main():
     # Initialize PyTorch Lightning module
     model = TabPFNTimeSeriesModule(reg, opt_config, model_config)
     
+    # Setup tags for W&B
+    tags = args.tags or []
+    if debug_mode:
+        tags.append("debug")
+    
     # Setup Weights & Biases logger
     wandb_logger = WandbLogger(
         project=args.wandb_project,
         entity=args.wandb_entity,
         name=args.run_name,
         log_model=True,
-        tags=["debug"] if debug_mode else None,
+        tags=tags if tags else None,
     )
     
     # Log hyperparameters
