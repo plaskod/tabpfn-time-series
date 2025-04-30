@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 import logging
 
+from tqdm import tqdm
 from datasets import load_dataset
 from torch.utils.data import Dataset, DataLoader
 
@@ -83,7 +84,9 @@ class TabPFNTimeSeriesPretrainDataset(Dataset):
             for name in self.dataset_names:
                 self.datasets.append(
                     load_dataset(
-                        dataset_repo_name, name, split="train",
+                        dataset_repo_name,
+                        name,
+                        split="train",
                         cache_dir=hf_cache_dir,
                     )
                 )
@@ -95,14 +98,14 @@ class TabPFNTimeSeriesPretrainDataset(Dataset):
                 )
                 logger.info(f"  - {dataset_name}: {len(dataset)} samples")
         load_data_end_time = time.time()
-        logger.info(f"Time taken to load data: {int(load_data_end_time - load_data_start_time)} seconds")
+        logger.info(
+            f"Time taken to load data: {int(load_data_end_time - load_data_start_time)} seconds"
+        )
 
         self.ts_preprocessor = TimeSeriesPreprocessor(
             max_context_length=self.max_context_length,
         )
-        self.feature_transformer = self._create_feature_transformer(
-            self.feature_config
-        )
+        self.feature_transformer = self._create_feature_transformer(self.feature_config)
 
         # Calculate total length across all datasets
         self.dataset_lengths = [len(ds) for ds in self.datasets]
@@ -222,34 +225,37 @@ def efficient_collate_fn(
 def load_all_ts_datasets(
     dataset: TabPFNTimeSeriesPretrainDataset,
     shuffle: bool = False,
-    loading_batch_size: int = 128,
-    loading_num_workers: int = 1,
     max_length: int = None,
 ) -> Tuple[list[XType], list[YType]]:
     """Load all time series datasets efficiently with minimal memory copying
-    
+
     Args:
         dataset: The dataset to load
         shuffle: Whether to shuffle the dataset
-        loading_batch_size: Batch size for loading
-        loading_num_workers: Number of workers for loading
         max_length: Maximum number of samples to load (None for all)
     """
+
+    # Automatically set num_workers to the number of available CPU cores
+    num_workers = os.cpu_count()
+    batch_size = 128
+    prefetch_factor = 2
+
     dataloader = DataLoader(
         dataset,
-        batch_size=loading_batch_size,
+        batch_size=batch_size,
         shuffle=shuffle,
         collate_fn=efficient_collate_fn,
         pin_memory=True,
-        num_workers=loading_num_workers,
+        num_workers=num_workers,
+        prefetch_factor=prefetch_factor,
     )
 
     # Pre-allocate a single list and extend it once per batch
     all_X, all_y = [], []
-    for X, y in dataloader:
+    for X, y in tqdm(dataloader, desc="Loading time seriesdatasets"):
         all_X.extend(X)
         all_y.extend(y)
-        
+
         # Stop loading if we've reached max_length
         if max_length is not None and len(all_X) >= max_length:
             all_X = all_X[:max_length]

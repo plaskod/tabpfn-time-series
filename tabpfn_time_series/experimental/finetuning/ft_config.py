@@ -5,11 +5,21 @@ import json
 
 @dataclass
 class FinetuneConfig:
-    model: 'FinetuneConfig.Model' = field(default_factory=lambda: FinetuneConfig.Model())
-    optimization: 'FinetuneConfig.Optimization' = field(default_factory=lambda: FinetuneConfig.Optimization())
-    preprocessing: 'FinetuneConfig.TabPFNPreprocessing' = field(default_factory=lambda: FinetuneConfig.TabPFNPreprocessing())
-    train_dataset: 'FinetuneConfig.TrainDataset' = field(default_factory=lambda: FinetuneConfig.TrainDataset())
-    test_dataset: 'FinetuneConfig.TestDataset' = field(default_factory=lambda: FinetuneConfig.TestDataset())
+    model: "FinetuneConfig.Model" = field(
+        default_factory=lambda: FinetuneConfig.Model()
+    )
+    optimization: "FinetuneConfig.Optimization" = field(
+        default_factory=lambda: FinetuneConfig.Optimization()
+    )
+    preprocessing: "FinetuneConfig.TabPFNPreprocessing" = field(
+        default_factory=lambda: FinetuneConfig.TabPFNPreprocessing()
+    )
+    train_dataset: "FinetuneConfig.TrainDataset" = field(
+        default_factory=lambda: FinetuneConfig.TrainDataset()
+    )
+    test_dataset: "FinetuneConfig.TestDataset" = field(
+        default_factory=lambda: FinetuneConfig.TestDataset()
+    )
 
     @dataclass
     class Model:
@@ -42,11 +52,9 @@ class FinetuneConfig:
     @dataclass
     class TestDataset:
         dataset_repo_name: str = "liamsbhoo/GiftEvalPretrain"
-        dataset_names: Tuple[str, ...] = (
-            "bdg-2_bear",
-        )
+        dataset_names: Tuple[str, ...] = ("bdg-2_bear",)
         max_context_length: int = 1000
-        
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert config to dictionary for JSON serialization."""
         return {
@@ -55,7 +63,7 @@ class FinetuneConfig:
             "train_dataset": asdict(self.train_dataset),
             "test_dataset": asdict(self.test_dataset),
         }
-        
+
     def to_json(self) -> str:
         """Convert config to JSON string."""
         return json.dumps(self.to_dict(), indent=2)
