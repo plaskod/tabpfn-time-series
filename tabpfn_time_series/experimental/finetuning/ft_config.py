@@ -1,6 +1,12 @@
 from dataclasses import dataclass, field, asdict
 from typing import Tuple, Dict, Any
 import json
+from enum import Enum
+
+
+class OptimizationSpace(Enum):
+    RAW = "raw"
+    PREPROCESSED = "preprocessed"
 
 
 @dataclass
@@ -33,6 +39,7 @@ class FinetuneConfig:
     class Optimization:
         n_epochs: int = 5
         lr: float = 1e-5
+        space: OptimizationSpace = OptimizationSpace.PREPROCESSED
         gradient_accumulation_steps: int = 16
 
     @dataclass
@@ -48,12 +55,14 @@ class FinetuneConfig:
             "bdg-2_rat",
         )
         max_context_length: int = 1000
+        prediction_length: int = 400
 
     @dataclass
     class TestDataset:
         dataset_repo_name: str = "liamsbhoo/GiftEvalPretrain"
         dataset_names: Tuple[str, ...] = ("bdg-2_bear",)
         max_context_length: int = 1000
+        prediction_length: int = 100
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert config to dictionary for JSON serialization."""

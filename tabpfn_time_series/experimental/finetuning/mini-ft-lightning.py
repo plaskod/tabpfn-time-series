@@ -5,6 +5,8 @@ Mini fine-tuning script for TabPFN Time Series models using PyTorch Lightning wi
 import os
 import logging
 import argparse
+import random
+from functools import partial
 from typing import Tuple, Any
 from dataclasses import dataclass, asdict
 from dotenv import load_dotenv
@@ -23,7 +25,10 @@ from tabpfn_time_series.experimental.finetuning.dataset import (
     TabPFNTimeSeriesPretrainDataset,
     load_all_ts_datasets,
 )
-from tabpfn_time_series.experimental.finetuning.ft_config import FinetuneConfig
+from tabpfn_time_series.experimental.finetuning.ft_config import (
+    FinetuneConfig,
+    OptimizationSpace,
+)
 
 
 # Configure logging
@@ -35,10 +40,9 @@ logging.basicConfig(
 
 
 def ts_splitfn(
-    X: np.ndarray, y: np.ndarray, **kwargs
+    X: np.ndarray, y: np.ndarray, prediction_length: int, **kwargs
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Split time series data into train and test sets."""
-    prediction_length = 100
     X_train = X[:-prediction_length]
     X_test = X[-prediction_length:]
     y_train = y[:-prediction_length]
@@ -95,6 +99,7 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
             cat_ixs,
             confs,
             renormalized_criterion,
+            bar_distribution,
             x_test_raw,
             y_test_raw,
             x_train_raw,
@@ -108,9 +113,12 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
         averaged_pred_logits, _, _ = self.forward(X_tests_preprocessed)
 
         # Calculate loss
-        loss_fn = renormalized_criterion
         loss = self._calculate_loss(
-            averaged_pred_logits, y_test_standardized, loss_fn, "train"
+            renormalized_criterion=renormalized_criterion,
+            bar_distribution=bar_distribution,
+            pred_logits=averaged_pred_logits,
+            targets=y_test_standardized,
+            prefix="train",
         )
         if loss is None:
             logging.warning("Train loss is None")
@@ -134,6 +142,7 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
             cat_ixs,
             confs,
             renormalized_criterion,
+            bar_distribution,
             x_test_raw,
             y_test_raw,
             x_train_raw,
@@ -152,9 +161,12 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
         averaged_pred_logits, _, _ = eval_model.forward(X_tests_preprocessed)
 
         # Calculate loss
-        loss_fn = renormalized_criterion
         loss = self._calculate_loss(
-            averaged_pred_logits, y_test_standardized, loss_fn, "val"
+            renormalized_criterion=renormalized_criterion,
+            bar_distribution=bar_distribution,
+            pred_logits=averaged_pred_logits,
+            targets=y_test_standardized,
+            prefix="val",
         )
         if loss is None:
             logging.warning("Validation loss is None")
@@ -184,6 +196,7 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
                 cat_ixs,
                 confs,
                 renormalized_criterion,
+                bar_distribution,
                 batch_x_test_raw,
                 batch_y_test_raw,
                 batch_x_train_raw,
@@ -192,6 +205,9 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
 
             assert len(renormalized_criterion) == 1
             renormalized_criterion = renormalized_criterion[0]
+
+            assert len(bar_distribution) == 1
+            bar_distribution = bar_distribution[0]
 
             assert batch_x_test_raw.shape[0] == 1
             assert batch_y_test_raw.shape[0] == 1
@@ -211,6 +227,7 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
                 cat_ixs,
                 confs,
                 renormalized_criterion,
+                bar_distribution,
                 x_test_raw,
                 y_test_raw,
                 x_train_raw,
@@ -237,8 +254,24 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
 
         return has_issues
 
-    def _calculate_loss(self, pred_logits, targets, loss_fn, prefix):
+    def _calculate_loss(
+        self,
+        renormalized_criterion,
+        bar_distribution,
+        pred_logits,
+        targets,
+        prefix,
+    ):
         """Calculate loss and handle numerical issues."""
+
+        # Select loss function based on optimization space
+        if self.opt_config.space == OptimizationSpace.PREPROCESSED:
+            loss_fn = renormalized_criterion
+        elif self.opt_config.space == OptimizationSpace.RAW:
+            loss_fn = bar_distribution
+        else:
+            raise ValueError(f"Invalid optimization space: {self.opt_config.space}")
+
         nll_loss_per_sample = loss_fn(pred_logits, targets.to(self.device))
         loss = nll_loss_per_sample.mean()
 
@@ -290,10 +323,6 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
 
         return EvalResult(mse=mse, mae=mae, r2=r2)
 
-        # except Exception as e:
-        #     logging.error(f"Error calculating metrics: {e}")
-        #     return EvalResult(mse=float('nan'), mae=float('nan'), r2=float('nan'))
-
     def on_train_epoch_end(self):
         """Log training statistics at the end of each epoch."""
         self.log("train/skipped_steps_epoch", self.current_epoch_train_skipped)
@@ -314,12 +343,6 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
 
     def configure_optimizers(self):
         """Configure the optimizer for training."""
-        trainable_params = sum(
-            p.numel() for p in self.regressor.model_.parameters() if p.requires_grad
-        )
-        logging.info(
-            f"Debug, optimizer:Model has {trainable_params} trainable parameters"
-        )
         return torch.optim.Adam(
             self.regressor.model_.parameters(), lr=self.opt_config.lr
         )
@@ -416,6 +439,15 @@ def setup_trainer(opt_config, wandb_logger):
     return trainer, checkpoint_callback
 
 
+def set_seed(seed):
+    """Set random seed for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    logging.info(f"Random seed set to {seed}")
+
+
 DEBUG_MESSAGE = """
 #########################################################
 #                                                       #
@@ -461,6 +493,9 @@ def parse_args():
         default=0,
         help="Number of worker processes for data loading",
     )
+    parser.add_argument(
+        "--seed", type=int, default=0, help="Random seed for reproducibility"
+    )
     return parser.parse_args()
 
 
@@ -479,6 +514,9 @@ def main():
     device = args.device
     debug_mode = args.debug
     num_workers = args.num_workers
+
+    # Set random seed for reproducibility
+    set_seed(args.seed)
 
     if debug_mode:
         logging.basicConfig(level=logging.DEBUG)
@@ -512,6 +550,7 @@ def main():
     # Log hyperparameters
     config_dict = all_config.to_dict()
     config_dict["debug_mode"] = debug_mode
+    config_dict["seed"] = args.seed
     wandb_logger.log_hyperparams(config_dict)
 
     # Initialize datasets
@@ -536,28 +575,6 @@ def main():
         train_dataset, test_dataset, debug_mode
     )
 
-    # for debug purpose
-    # Debug: Override all target values with random values between 0.4 and 0.5
-    import numpy as np
-
-    # Process all training datasets
-    for i in range(len(all_train_y)):
-        if isinstance(all_train_y[i], np.ndarray):
-            # Generate random values between 0.4 and 0.5
-            random_values = np.random.uniform(0.4, 0.5, size=all_train_y[i].shape)
-            all_train_y[i] = random_values
-
-    # Process all test datasets
-    for i in range(len(all_test_y)):
-        if isinstance(all_test_y[i], np.ndarray):
-            # Generate random values between 0.4 and 0.5
-            random_values = np.random.uniform(0.4, 0.5, size=all_test_y[i].shape)
-            all_test_y[i] = random_values
-
-    logging.info(
-        "Debug mode: Overrode all target values with random values between 0.4 and 0.5"
-    )
-
     # Setup regressor
     model_config = parse_model_config(all_config.model)
     model_config["device"] = device
@@ -568,13 +585,13 @@ def main():
     train_datasets_collection = reg.get_preprocessed_datasets(
         all_train_X,
         all_train_y,
-        ts_splitfn,
+        partial(ts_splitfn, prediction_length=train_dataset_config.prediction_length),
         max_data_size=preprocessing_config.max_data_size,
     )
     test_datasets_collection = reg.get_preprocessed_datasets(
         all_test_X,
         all_test_y,
-        ts_splitfn,
+        partial(ts_splitfn, prediction_length=test_dataset_config.prediction_length),
         max_data_size=preprocessing_config.max_data_size,
     )
 
