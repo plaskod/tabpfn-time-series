@@ -5,8 +5,8 @@ Mini fine-tuning script for TabPFN Time Series models using PyTorch Lightning wi
 import os
 import logging
 import argparse
-from typing import Tuple, Dict, Any, List, Optional
-from dataclasses import dataclass
+from typing import Tuple, Any
+from dataclasses import dataclass, asdict
 from dotenv import load_dotenv
 import numpy as np
 import torch
@@ -39,6 +39,7 @@ def ts_splitfn(
         y: np.ndarray,
         **kwargs
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Split time series data into train and test sets."""
     prediction_length = 100
     X_train = X[:-prediction_length]
     X_test = X[-prediction_length:]
@@ -50,16 +51,25 @@ def ts_splitfn(
 
 @dataclass
 class EvalResult:
+    """Container for evaluation metrics."""
     mse: float
     mae: float
     r2: float
 
 
 class TabPFNTimeSeriesModule(pl.LightningModule):
-    def __init__(self, regressor: TabPFNRegressor, opt_config: Any):
+    """PyTorch Lightning module for TabPFN Time Series fine-tuning."""
+    
+    def __init__(
+        self,
+        regressor: TabPFNRegressor,
+        opt_config: Any,
+        model_config: dict,
+    ):
         super().__init__()
         self.regressor = regressor
         self.opt_config = opt_config
+        self.model_config = model_config
         self.save_hyperparameters(ignore=["regressor"])
         self.train_skipped_steps = 0
         self.val_skipped_steps = 0
@@ -67,106 +77,192 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
         self.current_epoch_val_skipped = 0
         
     def forward(self, X_tests_preprocessed):
+        """Forward pass through the regressor."""
         return self.regressor.forward(X_tests_preprocessed)
     
-    def get_loss_fn(self):
-        if self.opt_config.space == "raw_label_space":
-            return self.regressor.bardist_.to(self.device)    
-        elif self.opt_config.space == "preprocessed":
-            return self.regressor.renormalized_criterion_.to(self.device)
-        else: 
-            raise ValueError("Need to define optimization space")
-    
     def training_step(self, batch, batch_idx):
+        """Execute a single training step."""
+        # Unpack batch
+        batch_data = self._unpack_batch(batch)
+        if batch_data is None:
+            return None
+            
         (
-            X_trains_preprocessed,
-            X_tests_preprocessed,
-            y_trains_preprocessed,
-            y_test_standardized,
-            cat_ixs,
-            confs,
-            renormalized_criterion, 
-            batch_x_test_raw,
-            batch_y_test_raw
-        ) = batch
-        
-        # Quick hack to fix different dtypes
-        batch_y_test_raw = batch_y_test_raw.to(torch.float32)
+            X_trains_preprocessed, X_tests_preprocessed, y_trains_preprocessed, y_test_standardized, \
+            cat_ixs, confs, renormalized_criterion, x_test_raw, y_test_raw, x_train_raw, y_train_raw
+        ) = batch_data
         
         # Forward pass
         self.regressor.fit_from_preprocessed(X_trains_preprocessed, y_trains_preprocessed, cat_ixs, confs)
         averaged_pred_logits, _, _ = self.forward(X_tests_preprocessed)
         
-        # Check for NaN/Inf values
-        if torch.isnan(averaged_pred_logits).any():
-            self.log("train/nan_detected", 1.0)
-            
-        if torch.isinf(averaged_pred_logits).any():
-            self.log("train/inf_detected", 1.0)
-        
-        # Calculate loss
-        loss_fn = self.get_loss_fn()
-        nll_loss_per_sample = loss_fn(averaged_pred_logits, batch_y_test_raw.to(self.device))
-        loss = nll_loss_per_sample.mean()
-        
-        # Skip infinite loss values
-        if torch.isinf(loss).any():
-            self.log("train/inf_loss_detected", 1.0)
-            self.train_skipped_steps += 1
-            self.current_epoch_train_skipped += 1
+        # Check for numerical issues
+        if self._check_numerical_issues(averaged_pred_logits, "train"):
             return None
         
+        # Calculate loss
+        loss_fn = renormalized_criterion
+        loss = self._calculate_loss(averaged_pred_logits, y_test_standardized, loss_fn, "train")
+        if loss is None:
+            return None
+            
         self.log("train/loss", loss, prog_bar=True)
         return loss
     
     def validation_step(self, batch, batch_idx):
+        """Execute a single validation step."""
+        # Unpack batch
+        batch_data = self._unpack_batch(batch)
+        if batch_data is None:
+            return None
+            
         (
-            X_trains_preprocessed,
-            X_tests_preprocessed,
-            y_trains_preprocessed,
-            y_test_standardized,
-            cat_ixs,
-            confs,
-            renormalized_criterion, 
-            batch_x_test_raw,
-            batch_y_test_raw
-        ) = batch
-        
-        # Quick hack to fix different dtypes
-        batch_y_test_raw = batch_y_test_raw.to(torch.float32)
+            X_trains_preprocessed, X_tests_preprocessed, y_trains_preprocessed, y_test_standardized, \
+            cat_ixs, confs, renormalized_criterion, x_test_raw, y_test_raw, x_train_raw, y_train_raw
+        ) = batch_data
+
+        # Get a copy of TabPFNRegressor
+        eval_model = _prepare_eval_model(self.regressor, self.model_config, TabPFNRegressor)
         
         # Forward pass
-        self.regressor.fit_from_preprocessed(X_trains_preprocessed, y_trains_preprocessed, cat_ixs, confs)
-        averaged_pred_logits, _, _ = self.forward(X_tests_preprocessed)
+        eval_model.fit_from_preprocessed(X_trains_preprocessed, y_trains_preprocessed, cat_ixs, confs)
+        averaged_pred_logits, _, _ = eval_model.forward(X_tests_preprocessed)
         
         # Calculate loss
-        loss_fn = self.get_loss_fn()
-        nll_loss_per_sample = loss_fn(averaged_pred_logits, batch_y_test_raw.to(self.device))
+        loss_fn = renormalized_criterion
+        loss = self._calculate_loss(averaged_pred_logits, y_test_standardized, loss_fn, "val")
+        if loss is None:
+            return None
+        
+        # Calculate regression metrics
+        metrics = self._calculate_regression_metrics(eval_model, x_train_raw, y_train_raw, x_test_raw, y_test_raw)
+        
+        # Log metrics
+        self.log("val/mse", metrics.mse, on_epoch=True, batch_size=1)
+        self.log("val/mae", metrics.mae, on_epoch=True, batch_size=1)
+        self.log("val/r2", metrics.r2, on_epoch=True, batch_size=1)
+        self.log("val/loss", loss, on_epoch=True, batch_size=1)
+        
+        # return {"loss": loss, "mse": metrics.mse, "mae": metrics.mae, "r2": metrics.r2}
+        return {"loss": loss}
+    
+    def _unpack_batch(self, batch):
+        """Unpack and preprocess batch data."""
+        try:
+            (
+                X_trains_preprocessed,
+                X_tests_preprocessed,
+                y_trains_preprocessed,
+                y_test_standardized,
+                cat_ixs,
+                confs,
+                renormalized_criterion, 
+                batch_x_test_raw,
+                batch_y_test_raw,
+                batch_x_train_raw,
+                batch_y_train_raw
+            ) = batch
+            
+            assert len(renormalized_criterion) == 1
+            renormalized_criterion = renormalized_criterion[0]
+
+            assert batch_x_test_raw.shape[0] == 1
+            assert batch_y_test_raw.shape[0] == 1
+            x_test_raw = batch_x_test_raw[0]
+            y_test_raw = batch_y_test_raw[0]
+
+            assert batch_x_train_raw.shape[0] == 1
+            assert batch_y_train_raw.shape[0] == 1
+            x_train_raw = batch_x_train_raw[0]
+            y_train_raw = batch_y_train_raw[0]
+
+            return (X_trains_preprocessed, X_tests_preprocessed, y_trains_preprocessed, 
+                    y_test_standardized, cat_ixs, confs, renormalized_criterion, 
+                    x_test_raw, y_test_raw, x_train_raw, y_train_raw)
+        
+        except Exception as e:
+            logging.error(f"Error unpacking batch: {e}")
+            return None
+    
+    def _check_numerical_issues(self, tensor, prefix):
+        """Check for NaN/Inf values in tensors."""
+        has_issues = False
+        
+        if torch.isnan(tensor).any():
+            self.log(f"{prefix}/nan_detected", 1.0)
+            has_issues = True
+            
+        if torch.isinf(tensor).any():
+            self.log(f"{prefix}/inf_detected", 1.0)
+            has_issues = True
+            
+        return has_issues
+    
+    def _calculate_loss(self, pred_logits, targets, loss_fn, prefix):
+        """Calculate loss and handle numerical issues."""
+        nll_loss_per_sample = loss_fn(pred_logits, targets.to(self.device))
         loss = nll_loss_per_sample.mean()
         
         # Skip infinite loss values
         if torch.isinf(loss).any():
-            self.log("val/inf_loss_detected", 1.0)
-            self.val_skipped_steps += 1
-            self.current_epoch_val_skipped += 1
+            self.log(f"{prefix}/inf_loss_detected", 1.0)
+            if prefix == "train":
+                self.train_skipped_steps += 1
+                self.current_epoch_train_skipped += 1
+            else:
+                self.val_skipped_steps += 1
+                self.current_epoch_val_skipped += 1
             return None
         
-        self.log("val/loss", loss, prog_bar=True)
         return loss
     
+    @staticmethod
+    def _calculate_regression_metrics(
+        model: TabPFNRegressor,
+        X_train: torch.Tensor,
+        y_train: torch.Tensor,
+        X_test: torch.Tensor,
+        y_test: torch.Tensor
+    ) -> EvalResult:
+        """Calculate standard regression metrics for model evaluation."""
+        
+        # Convert tensors to CPU for sklearn compatibility
+        X_train_cpu = X_train.cpu().numpy() if isinstance(X_train, torch.Tensor) else X_train
+        y_train_cpu = y_train.cpu().numpy() if isinstance(y_train, torch.Tensor) else y_train
+        X_test_cpu = X_test.cpu().numpy() if isinstance(X_test, torch.Tensor) else X_test
+        y_test_cpu = y_test.cpu().numpy() if isinstance(y_test, torch.Tensor) else y_test
+        
+        # Fit model and generate predictions
+        model.fit(X_train_cpu, y_train_cpu)
+        predictions = model.predict(X_test_cpu)
+        
+        # Calculate metrics
+        mse = mean_squared_error(y_test_cpu, predictions)
+        mae = mean_absolute_error(y_test_cpu, predictions)
+        r2 = r2_score(y_test_cpu, predictions)
+        
+        return EvalResult(mse=mse, mae=mae, r2=r2)
+        
+        # except Exception as e:
+        #     logging.error(f"Error calculating metrics: {e}")
+        #     return EvalResult(mse=float('nan'), mae=float('nan'), r2=float('nan'))
+    
     def on_train_epoch_end(self):
+        """Log training statistics at the end of each epoch."""
         self.log("train/skipped_steps_epoch", self.current_epoch_train_skipped)
         self.log("train/total_skipped_steps", self.train_skipped_steps)
         logging.info(f"Epoch {self.current_epoch}: Skipped {self.current_epoch_train_skipped} training steps")
         self.current_epoch_train_skipped = 0
     
     def on_validation_epoch_end(self):
+        """Log validation statistics at the end of each epoch."""
         self.log("val/skipped_steps_epoch", self.current_epoch_val_skipped)
         self.log("val/total_skipped_steps", self.val_skipped_steps)
         logging.info(f"Epoch {self.current_epoch}: Skipped {self.current_epoch_val_skipped} validation steps")
         self.current_epoch_val_skipped = 0
     
     def configure_optimizers(self):
+        """Configure the optimizer for training."""
         return torch.optim.Adam(
             self.regressor.model_.parameters(), 
             lr=self.opt_config.lr
@@ -174,71 +270,49 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
 
 
 def parse_args():
+    """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Fine-tuning script for TabPFN Time Series models")
     parser.add_argument("--device", type=str, default="cuda", help="Device to use for training (cuda or cpu)")
     parser.add_argument("--wandb_project", type=str, default="tabpfn-ts-ft", help="Weights & Biases project name")
     parser.add_argument("--wandb_entity", type=str, default=None, help="Weights & Biases entity name")
     parser.add_argument("--max_epochs", type=int, default=None, help="Maximum number of epochs to train")
     parser.add_argument("--run_name", type=str, default=None, help="Custom name for the W&B run")
+    parser.add_argument("--debug", action="store_true", help="Run in debug mode")
     return parser.parse_args()
 
 
-def main():
-    load_dotenv()
-    HF_CACHE_DIR = os.getenv("HF_CACHE_DIR")
-    
-    args = parse_args()
-    device = args.device
-
-    # Load hyperparams
-    all_config = FinetuneConfig()
-    opt_config = all_config.Optimization
-    
-    # Override epochs if specified in command line
-    if args.max_epochs is not None:
-        opt_config.n_epochs = args.max_epochs
-
-    train_dataset_config = all_config.TrainDataset
-    train_dataset = TabPFNTimeSeriesPretrainDataset(
-        dataset_repo_name=train_dataset_config.dataset_repo_name,
-        dataset_names=train_dataset_config.dataset_names,
-        max_context_length=train_dataset_config.max_context_length,
-        hf_cache_dir=HF_CACHE_DIR,
-    )
-
-    test_dataset_config = all_config.TestDataset
-    test_dataset = TabPFNTimeSeriesPretrainDataset(
-        dataset_repo_name=test_dataset_config.dataset_repo_name,
-        dataset_names=test_dataset_config.dataset_names,
-        max_context_length=test_dataset_config.max_context_length,
-        hf_cache_dir=HF_CACHE_DIR,
-    )
-
+def prepare_datasets(train_dataset, test_dataset, debug_mode=False):
+    """Prepare and potentially truncate datasets based on debug mode."""
     # Load all time series datasets
-    all_train_X, all_train_y = load_all_ts_datasets(train_dataset)
-    all_test_X, all_test_y = load_all_ts_datasets(test_dataset, shuffle=False)
+    logging.info("Loading all time series datasets...")
+
+    train_max_length = 10 if debug_mode else None
+    test_max_length = 5 if debug_mode else None
+    all_train_X, all_train_y = load_all_ts_datasets(train_dataset, max_length=train_max_length)
+    all_test_X, all_test_y = load_all_ts_datasets(test_dataset, max_length=test_max_length)
 
     logging.info(f"Loaded {len(all_train_X)} training samples and {len(all_test_X)} test samples")
-
-    # Initialize TabPFN regressor
-    model_config = all_config.Model
-    regressor_args = dict(
-        ignore_pretraining_limits=model_config.ignore_pretraining_limits,
-        n_estimators=model_config.n_estimators,
-        random_state=model_config.random_state,
-        device=device,
-        differentiable_input=model_config.differentiable_input,
-        inference_precision=torch.float32,
-    )
-        
-    reg = TabPFNRegressor(**regressor_args)
-    splitfn = ts_splitfn
-
-    # Preprocess datasets
-    train_datasets_collection = reg.get_preprocessed_datasets(all_train_X, all_train_y, splitfn, max_data_size=10000)
-    test_datasets_collection = reg.get_preprocessed_datasets(all_test_X, all_test_y, splitfn, max_data_size=10000)
+    logging.info(f"Lengths: (all_train_X, {len(all_train_X)}), (all_train_y, {len(all_train_y)}), "
+                 f"(all_test_X, {len(all_test_X)}), (all_test_y, {len(all_test_y)})")
     
-    # Create data loaders
+    return all_train_X, all_train_y, all_test_X, all_test_y
+
+
+def parse_model_config(model_config: FinetuneConfig.Model) -> dict:
+    """Parse the model config into a dictionary."""
+    precision_map = {
+        "float32": torch.float32,
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+    }
+
+    config = asdict(model_config)
+    config["inference_precision"] = precision_map[config["inference_precision"]]
+    return config
+
+
+def setup_data_loaders(train_datasets_collection, test_datasets_collection):
+    """Create and configure data loaders for training and validation."""
     train_dl = DataLoader(
         train_datasets_collection, 
         batch_size=1, 
@@ -254,20 +328,11 @@ def main():
         num_workers=0,
     )
     
-    # Initialize PyTorch Lightning module
-    model = TabPFNTimeSeriesModule(reg, opt_config)
-    
-    # Setup Weights & Biases logger
-    wandb_logger = WandbLogger(
-        project=args.wandb_project,
-        entity=args.wandb_entity,
-        name=args.run_name,
-        log_model=True,
-    )
-    
-    # Log hyperparameters
-    wandb_logger.log_hyperparams(all_config.to_dict())
-    
+    return train_dl, val_dl
+
+
+def setup_trainer(opt_config, wandb_logger):
+    """Configure and initialize the PyTorch Lightning trainer."""
     # Setup callbacks
     checkpoint_callback = ModelCheckpoint(
         dirpath="checkpoints/",
@@ -295,6 +360,105 @@ def main():
         accumulate_grad_batches=opt_config.gradient_accumulation_steps,
         log_every_n_steps=10,
     )
+    
+    return trainer, checkpoint_callback
+
+DEBUG_MESSAGE = \
+"""
+#########################################################
+#                                                       #
+#                      DEBUG MODE                       #
+#                                                       #
+#########################################################
+"""
+
+
+def main():
+    """Main entry point for the fine-tuning script."""
+    # Load environment variables
+    load_dotenv()
+    HF_CACHE_DIR = os.getenv("HF_CACHE_DIR")
+    if HF_CACHE_DIR is None:
+        logging.warning("HF_CACHE_DIR environment variable not set. Using default cache directory.")
+    
+    # Parse command line arguments
+    args = parse_args()
+    device = args.device
+    debug_mode = args.debug
+
+    if debug_mode:
+        logging.basicConfig(level=logging.DEBUG)
+        print(DEBUG_MESSAGE)
+
+    # Load hyperparams
+    all_config = FinetuneConfig()
+    opt_config = all_config.optimization
+    
+    # Override epochs if specified in command line
+    if args.max_epochs is not None:
+        opt_config.n_epochs = args.max_epochs
+    elif debug_mode:
+        # Reduce epochs in debug mode if not explicitly set
+        opt_config.n_epochs = min(2, opt_config.n_epochs)
+
+    # Initialize datasets
+    train_dataset_config = all_config.train_dataset
+    train_dataset = TabPFNTimeSeriesPretrainDataset(
+        dataset_repo_name=train_dataset_config.dataset_repo_name,
+        dataset_names=train_dataset_config.dataset_names,
+        max_context_length=train_dataset_config.max_context_length,
+        hf_cache_dir=HF_CACHE_DIR,
+    )
+
+    test_dataset_config = all_config.test_dataset
+    test_dataset = TabPFNTimeSeriesPretrainDataset(
+        dataset_repo_name=test_dataset_config.dataset_repo_name,
+        dataset_names=test_dataset_config.dataset_names,
+        max_context_length=test_dataset_config.max_context_length,
+        hf_cache_dir=HF_CACHE_DIR,
+    )
+
+    # Prepare datasets
+    all_train_X, all_train_y, all_test_X, all_test_y = prepare_datasets(
+        train_dataset, test_dataset, debug_mode
+    )
+
+    # Setup regressor
+    model_config = parse_model_config(all_config.model)
+    model_config["device"] = device
+    reg = TabPFNRegressor(**model_config)
+
+    # Preprocess datasets for TabPFN
+    preprocessing_config = all_config.preprocessing
+    train_datasets_collection = reg.get_preprocessed_datasets(
+        all_train_X, all_train_y, ts_splitfn, max_data_size=preprocessing_config.max_data_size
+    )
+    test_datasets_collection = reg.get_preprocessed_datasets(
+        all_test_X, all_test_y, ts_splitfn, max_data_size=preprocessing_config.max_data_size
+    )
+    
+    # Setup data loaders
+    train_dl, val_dl = setup_data_loaders(train_datasets_collection, test_datasets_collection)
+    
+    # Initialize PyTorch Lightning module
+    model = TabPFNTimeSeriesModule(reg, opt_config, model_config)
+    
+    # Setup Weights & Biases logger
+    wandb_logger = WandbLogger(
+        project=args.wandb_project,
+        entity=args.wandb_entity,
+        name=args.run_name,
+        log_model=True,
+        tags=["debug"] if debug_mode else None,
+    )
+    
+    # Log hyperparameters
+    config_dict = all_config.to_dict()
+    config_dict["debug_mode"] = debug_mode
+    wandb_logger.log_hyperparams(config_dict)
+    
+    # Setup trainer
+    trainer, checkpoint_callback = setup_trainer(opt_config, wandb_logger)
     
     # Train the model
     trainer.fit(model, train_dl, val_dl)

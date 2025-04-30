@@ -224,8 +224,17 @@ def load_all_ts_datasets(
     shuffle: bool = False,
     loading_batch_size: int = 128,
     loading_num_workers: int = 1,
+    max_length: int = None,
 ) -> Tuple[list[XType], list[YType]]:
-    """Load all time series datasets efficiently with minimal memory copying"""
+    """Load all time series datasets efficiently with minimal memory copying
+    
+    Args:
+        dataset: The dataset to load
+        shuffle: Whether to shuffle the dataset
+        loading_batch_size: Batch size for loading
+        loading_num_workers: Number of workers for loading
+        max_length: Maximum number of samples to load (None for all)
+    """
     dataloader = DataLoader(
         dataset,
         batch_size=loading_batch_size,
@@ -240,5 +249,11 @@ def load_all_ts_datasets(
     for X, y in dataloader:
         all_X.extend(X)
         all_y.extend(y)
+        
+        # Stop loading if we've reached max_length
+        if max_length is not None and len(all_X) >= max_length:
+            all_X = all_X[:max_length]
+            all_y = all_y[:max_length]
+            break
 
     return all_X, all_y

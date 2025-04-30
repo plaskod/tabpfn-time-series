@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field, asdict
-from typing import List, Tuple, Dict, Any
+from typing import Tuple, Dict, Any
 import json
 
 
@@ -7,6 +7,7 @@ import json
 class FinetuneConfig:
     model: 'FinetuneConfig.Model' = field(default_factory=lambda: FinetuneConfig.Model())
     optimization: 'FinetuneConfig.Optimization' = field(default_factory=lambda: FinetuneConfig.Optimization())
+    preprocessing: 'FinetuneConfig.TabPFNPreprocessing' = field(default_factory=lambda: FinetuneConfig.TabPFNPreprocessing())
     train_dataset: 'FinetuneConfig.TrainDataset' = field(default_factory=lambda: FinetuneConfig.TrainDataset())
     test_dataset: 'FinetuneConfig.TestDataset' = field(default_factory=lambda: FinetuneConfig.TestDataset())
 
@@ -16,14 +17,17 @@ class FinetuneConfig:
         n_estimators: int = 8
         random_state: int = 0
         differentiable_input: bool = False
+        inference_precision: str = "float32"
 
     @dataclass
     class Optimization:
         n_epochs: int = 5
         lr: float = 1e-5
-        # space: str = "raw_label_space"
-        space: str = "preprocessed"
         gradient_accumulation_steps: int = 16
+
+    @dataclass
+    class TabPFNPreprocessing:
+        max_data_size: int = 10000
 
     @dataclass
     class TrainDataset:
@@ -41,7 +45,7 @@ class FinetuneConfig:
         dataset_names: Tuple[str, ...] = (
             "bdg-2_bear",
         )
-        max_context_length: int = 500
+        max_context_length: int = 1000
         
     def to_dict(self) -> Dict[str, Any]:
         """Convert config to dictionary for JSON serialization."""
