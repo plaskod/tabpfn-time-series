@@ -13,3 +13,5 @@ lightning_logs/
 catboost_info/
 
 .vscode/
+checkpoints/
+logs/
