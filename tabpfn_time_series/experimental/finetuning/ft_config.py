@@ -32,7 +32,6 @@ class FinetuneConfig:
         ignore_pretraining_limits: bool = True
         n_estimators: int = 8
         random_state: int = 0
-        differentiable_input: bool = False
         inference_precision: str = "float32"
 
     @dataclass
@@ -55,7 +54,7 @@ class FinetuneConfig:
             "bdg-2_rat",
         )
         max_context_length: int = 1000
-        prediction_length: int = 400
+        prediction_length: int = 100
 
     @dataclass
     class TestDataset:

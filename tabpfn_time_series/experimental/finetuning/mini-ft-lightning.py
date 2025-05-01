@@ -60,6 +60,12 @@ class EvalResult:
     r2: float
 
 
+TABPFN_ENABLE_TRAINING_KWARGS = {
+    "differentiable_input": False,
+    "fit_mode": "batched",
+}
+
+
 class TabPFNTimeSeriesModule(pl.LightningModule):
     """PyTorch Lightning module for TabPFN Time Series fine-tuning."""
 
@@ -151,7 +157,9 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
 
         # Get a copy of TabPFNRegressor
         eval_model = _prepare_eval_model(
-            self.regressor, self.model_config, TabPFNRegressor
+            original_model=self.regressor,
+            eval_init_args={**self.model_config, **TABPFN_ENABLE_TRAINING_KWARGS},
+            model_class=TabPFNRegressor,
         )
 
         # Forward pass
@@ -173,6 +181,14 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
             return None
 
         # Calculate regression metrics
+        # Note: need to re-prepare the eval model
+        # ("batched" mode -> fit_from_preprocessed,
+        #  non-"batched" mode -> fit)
+        eval_model = _prepare_eval_model(
+            original_model=self.regressor,
+            eval_init_args=self.model_config,
+            model_class=TabPFNRegressor,
+        )
         metrics = self._calculate_regression_metrics(
             eval_model, x_train_raw, y_train_raw, x_test_raw, y_test_raw
         )
@@ -265,9 +281,9 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
         """Calculate loss and handle numerical issues."""
 
         # Select loss function based on optimization space
-        if self.opt_config.space == OptimizationSpace.PREPROCESSED:
+        if self.opt_config.space == OptimizationSpace.RAW:
             loss_fn = renormalized_criterion
-        elif self.opt_config.space == OptimizationSpace.RAW:
+        elif self.opt_config.space == OptimizationSpace.PREPROCESSED:
             loss_fn = bar_distribution
         else:
             raise ValueError(f"Invalid optimization space: {self.opt_config.space}")
@@ -490,8 +506,8 @@ def parse_args():
     parser.add_argument(
         "--num_workers",
         type=int,
-        default=0,
-        help="Number of worker processes for data loading",
+        default=None,
+        help="Number of worker processes for data loading. If None, uses CPU count - 1",
     )
     parser.add_argument(
         "--seed", type=int, default=0, help="Random seed for reproducibility"
@@ -513,7 +529,13 @@ def main():
     args = parse_args()
     device = args.device
     debug_mode = args.debug
-    num_workers = args.num_workers
+
+    # Automatically determine optimal number of workers if not specified
+    if args.num_workers is None:
+        num_workers = max(1, os.cpu_count() - 1)
+        logging.info(f"Using {num_workers} workers for data loading")
+    else:
+        num_workers = args.num_workers
 
     # Set random seed for reproducibility
     set_seed(args.seed)
@@ -578,7 +600,7 @@ def main():
     # Setup regressor
     model_config = parse_model_config(all_config.model)
     model_config["device"] = device
-    reg = TabPFNRegressor(**model_config)
+    reg = TabPFNRegressor(**model_config, **TABPFN_ENABLE_TRAINING_KWARGS)
 
     # Preprocess datasets for TabPFN
     preprocessing_config = all_config.preprocessing
