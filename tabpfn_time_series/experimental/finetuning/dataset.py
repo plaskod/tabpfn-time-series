@@ -284,9 +284,9 @@ def load_all_ts_datasets(
             logger.debug(f"Applying preprocess_fn to {len(batch_X)} samples")
             # Process in a single list comprehension to avoid intermediate lists
             valid_pairs = [
-                (X, y)
+                result
                 for X, y in zip(batch_X, batch_y)
-                if preprocess_fn(X, y) is not None
+                if (result := preprocess_fn(X, y)) is not None
             ]
             n_samples_skipped += len(batch_X) - len(valid_pairs)
             logger.debug(f"Left with {len(valid_pairs)} samples")
