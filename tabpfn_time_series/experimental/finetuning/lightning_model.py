@@ -1,3 +1,4 @@
+import os
 import logging
 from typing import Any
 from dataclasses import dataclass
@@ -40,19 +41,12 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
         self.regressor = TabPFNRegressor(
             **self.tabpfn_model_config, **TABPFN_ENABLE_FINETUNING_KWARGS
         )
-        self.model = None  # Only used for tracking, will be initialized before fitting
         self.training_config = training_config
         self.save_hyperparameters(ignore=["regressor"])
         self.train_skipped_steps = 0
         self.val_skipped_steps = 0
         self.current_epoch_train_skipped = 0
         self.current_epoch_val_skipped = 0
-
-    def on_fit_start(self):
-        """Initialize the model."""
-        # model_ of tabpfn is only initialized after fit_from_preprocessed
-        # hacky, consider ignoring this.
-        self.model = self.regressor.model_
 
     def forward(self, X_tests_preprocessed):
         """Forward pass through the regressor."""
@@ -95,7 +89,15 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
             prefix="train",
         )
         if loss is None:
-            logging.warning("Train loss is None")
+            logging.warning(f"Batch: {batch_idx}, Train loss is None")
+
+            if os.environ.get("DEBUG_SAVE_RAW_DATA"):
+                self._save_debug_data(
+                    batch_idx, x_train_raw, y_train_raw, x_test_raw, y_test_raw, "train"
+                )
+
+            self.train_skipped_steps += 1
+            self.current_epoch_train_skipped += 1
             return None
 
         self.log("train/loss", loss, prog_bar=True)
@@ -324,3 +326,26 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
         return torch.optim.Adam(
             self.regressor.model_.parameters(), lr=self.training_config["lr"]
         )
+
+    def _save_debug_data(
+        self, batch_idx, x_train_raw, y_train_raw, x_test_raw, y_test_raw, prefix
+    ):
+        """Save debug data to CSV files."""
+        import os
+        import pandas as pd
+
+        # Create debug directory if it doesn't exist
+        debug_dir = os.path.join("debug_bad_data", prefix, f"batch_{batch_idx}")
+        os.makedirs(debug_dir, exist_ok=True)
+
+        # Save raw data to CSV files
+        pd.DataFrame(x_train_raw.cpu()).to_csv(
+            os.path.join(debug_dir, "x_train_raw.csv")
+        )
+        pd.DataFrame(y_train_raw.cpu()).to_csv(
+            os.path.join(debug_dir, "y_train_raw.csv")
+        )
+        pd.DataFrame(x_test_raw.cpu()).to_csv(os.path.join(debug_dir, "x_test_raw.csv"))
+        pd.DataFrame(y_test_raw.cpu()).to_csv(os.path.join(debug_dir, "y_test_raw.csv"))
+
+        logging.info(f"Saved debug data for batch {batch_idx} to {debug_dir}")

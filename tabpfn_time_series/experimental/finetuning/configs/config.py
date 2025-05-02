@@ -83,8 +83,18 @@ class ConfigManager:
     @classmethod
     def update_from_args(cls, config: DictConfig, args: Any) -> DictConfig:
         """Update configuration from command line arguments."""
-        # Convert args to dict, filtering out None values
-        args_dict = {k: v for k, v in vars(args).items() if v is not None}
+        args_dict = {}
+        for k, v in vars(args).items():
+            # If the argument exists in config and has a value, update it
+            if k in config and v is not None:
+                args_dict[k] = v
+
+            # If the argument doesn't exist in config, add it regardless of value
+            elif k not in config:
+                args_dict[k] = v
+
+            # If the argument exists in config but value is None, keep the config value
+            # (no action needed as we don't add it to args_dict)
 
         # Create a config from args and merge with existing config
         args_conf = OmegaConf.create(args_dict)

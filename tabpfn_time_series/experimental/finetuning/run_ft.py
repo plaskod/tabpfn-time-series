@@ -25,6 +25,7 @@ from tabpfn.utils import collate_for_tabpfn_dataset
 from tabpfn_time_series.experimental.finetuning.dataset import (
     TabPFNTimeSeriesPretrainDataset,
     load_all_ts_datasets,
+    filter_constant_series,
 )
 from tabpfn_time_series.experimental.finetuning.configs.config import ConfigManager
 from tabpfn_time_series.experimental.finetuning.lightning_model import (
@@ -101,6 +102,11 @@ def parse_args():
     parser.add_argument(
         "--log_model", type=bool, default=True, help="Log the model to Weights & Biases"
     )
+    parser.add_argument(
+        "--resume_from_checkpoint",
+        type=str,
+        help="Path to checkpoint file to resume training from",
+    )
 
     # Dataset settings
     parser.add_argument(
@@ -159,7 +165,7 @@ def setup_trainer(config: DictConfig, wandb_logger):
     """Configure and initialize the PyTorch Lightning trainer."""
     # Setup callbacks
     checkpoint_callback = ModelCheckpoint(
-        dirpath="checkpoints/",
+        dirpath=f"checkpoints/{config.experiment_name}/{config.run_name}",
         filename="tabpfn-ts-{epoch:02d}-{val_loss:.4f}",
         monitor="val/loss",
         mode="min",
@@ -175,13 +181,13 @@ def setup_trainer(config: DictConfig, wandb_logger):
 
     # Initialize trainer
     trainer = pl.Trainer(
-        max_epochs=config.optimization.n_epochs,
+        max_epochs=config.optimization.max_epochs,
         logger=wandb_logger,
         callbacks=[checkpoint_callback, early_stop_callback],
         accelerator="auto",
         gradient_clip_val=1.0,
         accumulate_grad_batches=config.optimization.gradient_accumulation_steps,
-        log_every_n_steps=10,
+        log_every_n_steps=8,
     )
 
     return trainer, checkpoint_callback
@@ -227,6 +233,10 @@ def main():
         logging.getLogger().setLevel(logging.DEBUG)
         logger.debug("Debug mode enabled")
 
+    # Debug
+    # Set logging level to DEBUG
+    # logging.getLogger().setLevel(logging.DEBUG)
+
     # Get HF cache directory from environment
     hf_cache_dir = os.getenv("HF_CACHE_DIR")
     if hf_cache_dir is None:
@@ -242,6 +252,12 @@ def main():
     tags = config.tags
     if debug_mode:
         tags.append("debug")
+
+    # Update run name if resuming from checkpoint
+    if config.resume_from_checkpoint:
+        config.run_name = f"{config.run_name}-resumed"
+        if "resumed" not in tags:
+            tags.append("resumed")
 
     # Setup Weights & Biases logger
     wandb_logger = WandbLogger(
@@ -269,15 +285,19 @@ def main():
         hf_cache_dir=hf_cache_dir,
     )
 
-    # Prepare datasetsd
+    # Prepare dataset
     train_max_length = 20 if debug_mode else None
     test_max_length = 5 if debug_mode else None
 
     all_train_X, all_train_y = load_all_ts_datasets(
-        train_dataset, max_length=train_max_length
+        train_dataset,
+        max_length=train_max_length,
+        preprocess_fn=filter_constant_series,
     )
     all_test_X, all_test_y = load_all_ts_datasets(
-        test_dataset, max_length=test_max_length
+        test_dataset,
+        max_length=test_max_length,
+        preprocess_fn=filter_constant_series,
     )
 
     logger.info(
@@ -335,7 +355,11 @@ def main():
 
     # Setup trainer and start training
     trainer, checkpoint_callback = setup_trainer(config, wandb_logger)
-    trainer.fit(lightning_model, train_dl, val_dl)
+    if config.resume_from_checkpoint:
+        logger.info(f"Resuming from checkpoint: {config.resume_from_checkpoint}")
+    trainer.fit(
+        lightning_model, train_dl, val_dl, ckpt_path=config.resume_from_checkpoint
+    )
 
     # Log best model path
     if checkpoint_callback.best_model_path:

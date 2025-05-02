@@ -1,6 +1,6 @@
 import os
 import time
-from typing import Tuple, TypeAlias
+from typing import Tuple, TypeAlias, Optional, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 import pandas as pd
@@ -218,27 +218,52 @@ class TabPFNTimeSeriesPretrainDataset(Dataset):
 def efficient_collate_fn(
     batch: list[Tuple[XType, YType]],
 ) -> Tuple[list[XType], list[YType]]:
-    """Efficiently collate batches by using zip to unpack in one pass"""
-    return zip(*batch)
+    """
+    Efficiently collate batches of (X, y) pairs.
+
+    Args:
+        batch: List of (X, y) tuples where X is a DataFrame and y is a Series
+
+    Returns:
+        Tuple of (X_list, y_list) where X_list contains all DataFrames and
+        y_list contains all Series from the batch
+    """
+    # Unpack the batch of (X, y) tuples into separate lists of X and y
+    X_list, y_list = [], []
+    for X, y in batch:
+        X_list.append(X)
+        y_list.append(y)
+
+    return X_list, y_list
 
 
 def load_all_ts_datasets(
     dataset: TabPFNTimeSeriesPretrainDataset,
     shuffle: bool = False,
     max_length: int = None,
+    preprocess_fn: Callable[[XType, YType], Tuple[XType, YType]] = None,
 ) -> Tuple[list[XType], list[YType]]:
-    """Load all time series datasets efficiently with minimal memory copying
+    """
+    Load all time series datasets efficiently with minimal memory copying
 
     Args:
         dataset: The dataset to load
         shuffle: Whether to shuffle the dataset
         max_length: Maximum number of samples to load (None for all)
-    """
+        preprocess_fn: Optional callable to preprocess/filter individual samples
+                      Should take (X, y) and return (X, y) for each sample
 
+    Returns:
+        Tuple of (all_X, all_y) where all_X is a list of DataFrames and
+        all_y is a list of Series
+    """
     # Automatically set num_workers to the number of available CPU cores
-    num_workers = os.cpu_count()
+    num_workers = min(os.cpu_count(), 8)  # Cap at 8 workers to avoid overhead
     batch_size = 128
-    prefetch_factor = 2
+    prefetch_factor = 4
+
+    # Pre-allocate lists with known capacity to avoid resizing
+    all_X, all_y = [], []
 
     dataloader = DataLoader(
         dataset,
@@ -250,16 +275,106 @@ def load_all_ts_datasets(
         prefetch_factor=prefetch_factor,
     )
 
-    # Pre-allocate a single list and extend it once per batch
-    all_X, all_y = [], []
-    for X, y in tqdm(dataloader, desc="Loading time seriesdatasets"):
-        all_X.extend(X)
-        all_y.extend(y)
+    # Process each batch
+    n_samples_loaded = 0
+    n_samples_skipped = 0
+    for batch_X, batch_y in tqdm(dataloader, desc="Loading time series datasets"):
+        # Apply preprocessing to each sample in the batch if provided
+        if preprocess_fn is not None:
+            logger.debug(f"Applying preprocess_fn to {len(batch_X)} samples")
+            # Process in a single list comprehension to avoid intermediate lists
+            valid_pairs = [
+                (X, y)
+                for X, y in zip(batch_X, batch_y)
+                if preprocess_fn(X, y) is not None
+            ]
+            n_samples_skipped += len(batch_X) - len(valid_pairs)
+            logger.debug(f"Left with {len(valid_pairs)} samples")
 
-        # Stop loading if we've reached max_length
-        if max_length is not None and len(all_X) >= max_length:
-            all_X = all_X[:max_length]
-            all_y = all_y[:max_length]
-            break
+            # Only unzip if we have valid samples
+            if valid_pairs:
+                batch_X, batch_y = zip(*valid_pairs)
+            else:
+                batch_X, batch_y = [], []
+
+        # Check if we've reached max_length before extending
+        if max_length is not None:
+            remaining = max_length - n_samples_loaded
+            if remaining <= 0:
+                break
+
+            # Only take what we need to reach max_length
+            if len(batch_X) > remaining:
+                batch_X = batch_X[:remaining]
+                batch_y = batch_y[:remaining]
+
+        # Add samples and update counter
+        all_X.extend(batch_X)
+        all_y.extend(batch_y)
+        n_samples_loaded += len(batch_X)
+
+    logger.info(f"Loaded {len(all_X)} total samples, skipped {n_samples_skipped}")
+
+    # Optional debugging: Save dataset to CSV files if debug flag is set
+    if os.environ.get("DEBUG_SAVE_RAW_DATA"):
+        save_data_into_csvs(all_X, all_y)
 
     return all_X, all_y
+
+
+def save_data_into_csvs(all_X, all_y):
+    """
+    Save dataset to CSV files for debugging purposes.
+
+    Args:
+        all_X: List of feature DataFrames
+        all_y: List of target Series
+    """
+    import pandas as pd
+
+    try:
+        all_X_df, all_y_df = [], []
+        for i, (X, y) in enumerate(zip(all_X, all_y)):
+            # Create copies to avoid modifying originals
+            X_copy = X.copy() if hasattr(X, "copy") else X
+            y_copy = y.copy() if hasattr(y, "copy") else y
+
+            X_copy["index"] = i
+            y_copy = pd.DataFrame(y_copy)
+            y_copy["index"] = i
+
+            all_X_df.append(X_copy)
+            all_y_df.append(y_copy)
+
+        pd.concat(all_X_df).to_csv("debug_all_X.csv", index=False)
+        logger.debug("Saved features to debug_all_X.csv")
+
+        pd.concat(all_y_df).to_csv("debug_all_y.csv", index=False)
+        logger.debug("Saved targets to debug_all_y.csv")
+
+    except Exception as e:
+        logger.warning(f"Failed to save debug CSV files: {e}")
+
+
+def filter_constant_series(
+    X: XType,
+    y: YType,
+    threshold: float = 1e-8,
+) -> Optional[Tuple[XType, YType]]:
+    """
+    Filter out time series with nearly constant y values.
+
+    Args:
+        X: Feature DataFrame
+        y: Target Series
+
+    Returns:
+        Tuple of (X, y) if the series passes the filters, None otherwise
+    """
+    # Skip if standard deviation is too small (nearly constant)
+    if y.std() < threshold:
+        logger.debug(f"Skipping constant series with std: {y.std()}")
+        return None
+
+    # Series passed all filters
+    return X, y
