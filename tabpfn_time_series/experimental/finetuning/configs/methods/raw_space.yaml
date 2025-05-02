@@ -3,4 +3,4 @@ optimization:
   gradient_accumulation_steps: 8
   early_stopping_patience: 5
   max_epochs: 10
-  finetune_space: preprocessed
+  finetune_space: raw

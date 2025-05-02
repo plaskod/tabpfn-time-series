@@ -7,6 +7,7 @@ base_model:
   n_estimators: 8
   inference_precision: float32
   ignore_pretraining_limits: true
+  categorical_features_indices: []
 
 train_datasets:
   dataset_repo_name: liamsbhoo/GiftEvalPretrain

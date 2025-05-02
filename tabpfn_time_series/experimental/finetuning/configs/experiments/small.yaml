@@ -11,7 +11,15 @@ base_model:
 train_datasets:
   dataset_repo_name: liamsbhoo/GiftEvalPretrain
   dataset_names:
+    - 
+  max_context_length: 1000
+  prediction_length: 100
+
+test_datasets:
+  dataset_repo_name: liamsbhoo/GiftEvalPretrain
+  dataset_names:
     - bdg-2_panther
+    - bdg-2_fox
     - bdg-2_rat
     - bdg-2_bear
     - lcl
@@ -19,14 +27,7 @@ train_datasets:
     - ideal
     - sceaux
     - borealis
-  max_context_length: 1024
-  prediction_length: 100
-
-test_datasets:
-  dataset_repo_name: liamsbhoo/GiftEvalPretrain
-  dataset_names:
-    - bdg-2_fox
-  max_context_length: 1024
+  max_context_length: 1000
   prediction_length: 100
 
 tabpfn_split_max_data_size: 10000 
