@@ -10,10 +10,11 @@ import random
 from functools import partial
 import numpy as np
 from dotenv import load_dotenv
-from typing import Tuple
+from typing import Tuple, List
 
 import torch
 from torch.utils.data import DataLoader
+from sklearn.model_selection import train_test_split
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
@@ -26,11 +27,16 @@ from tabpfn_time_series.experimental.finetuning.dataset import (
     TabPFNTimeSeriesPretrainDataset,
     load_all_ts_datasets,
     filter_constant_series,
+    XTrainType,
+    YTrainType,
+    XTestType,
+    YTestType,
 )
 from tabpfn_time_series.experimental.finetuning.configs.config import ConfigManager
 from tabpfn_time_series.experimental.finetuning.lightning_model import (
     TabPFNTimeSeriesModule,
 )
+from tabpfn_time_series.experimental.finetuning.run_ft_args import common_parse_args
 
 
 # Configure logging
@@ -51,74 +57,6 @@ def set_seed(seed):
     logger.info(f"Random seed set to {seed}")
 
 
-def parse_args():
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description="Fine-tune TabPFN Time Series models")
-
-    # Configuration
-    parser.add_argument(
-        "--experiment",
-        type=str,
-        required=True,
-        help="Name of the experiment configuration to use",
-    )
-    parser.add_argument(
-        "--method",
-        type=str,
-        help="Name of the method configuration to use (overrides experiment's method)",
-    )
-
-    # Runtime settings
-    parser.add_argument(
-        "--device", type=str, help="Device to use for training (cuda or cpu)"
-    )
-    parser.add_argument("--seed", type=int, help="Random seed for reproducibility")
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Run in debug mode with reduced dataset size",
-    )
-
-    # Logging settings
-    parser.add_argument(
-        "--wandb_project",
-        type=str,
-        default="tabpfn-ts-ft",
-        help="Weights & Biases project name",
-    )
-    parser.add_argument(
-        "--run_name",
-        type=str,
-        default="dummy-run-name",
-        help="Custom name for the W&B run",
-    )
-    parser.add_argument("--tags", type=str, nargs="+", help="Tags for the W&B run")
-
-    # Training settings
-    parser.add_argument(
-        "--max_epochs", type=int, help="Maximum number of epochs to train"
-    )
-    parser.add_argument("--lr", type=float, help="Learning rate")
-    parser.add_argument(
-        "--log_model", type=bool, default=True, help="Log the model to Weights & Biases"
-    )
-    parser.add_argument(
-        "--resume_from_checkpoint",
-        type=str,
-        help="Path to checkpoint file to resume training from",
-    )
-
-    # Dataset settings
-    parser.add_argument(
-        "--train_datasets", type=str, nargs="+", help="Names of training datasets"
-    )
-    parser.add_argument(
-        "--test_datasets", type=str, nargs="+", help="Names of test datasets"
-    )
-
-    return parser.parse_args()
-
-
 def ts_splitfn(
     X: np.ndarray, y: np.ndarray, prediction_length: int, **kwargs
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -131,10 +69,80 @@ def ts_splitfn(
     return X_train, X_test, y_train, y_test
 
 
+def setup_datasets(
+    config: DictConfig,
+    debug_mode: bool = False,
+    hf_cache_dir: str = None,
+) -> Tuple[List[XTrainType], List[YTrainType], List[XTestType], List[YTestType]]:
+    """Setup datasets for training and validation."""
+
+    train_dataset = TabPFNTimeSeriesPretrainDataset(
+        dataset_repo_name=config.train_datasets.dataset_repo_name,
+        dataset_names=config.train_datasets.dataset_names,
+        max_context_length=config.train_datasets.max_context_length,
+        hf_cache_dir=hf_cache_dir,
+    )
+
+    train_max_length = 10 if debug_mode else None
+    test_max_length = 5 if debug_mode else None
+
+    if config.use_train_datasets_only:
+        logger.info("Loading train datasets only")
+        logger.info(
+            f"Train dataset: repo={train_dataset.dataset_repo_name}, names={train_dataset.dataset_names}"
+        )
+
+        all_X, all_y = load_all_ts_datasets(
+            train_dataset,
+            max_length=train_max_length,
+            preprocess_fn=filter_constant_series,
+            prefix="train",
+        )
+
+        # Split into train and test sets
+        all_train_X, all_test_X, all_train_y, all_test_y = train_test_split(
+            all_X, all_y, test_size=0.2, random_state=config.seed
+        )
+
+    else:
+        logger.info("Loading train and test datasets")
+
+        test_dataset = TabPFNTimeSeriesPretrainDataset(
+            dataset_repo_name=config.test_datasets.dataset_repo_name,
+            dataset_names=config.test_datasets.dataset_names,
+            max_context_length=config.test_datasets.max_context_length,
+            hf_cache_dir=hf_cache_dir,
+        )
+
+        logger.info(
+            f"Train dataset: repo={train_dataset.dataset_repo_name}, names={train_dataset.dataset_names}"
+        )
+        logger.info(
+            f"Test dataset: repo={test_dataset.dataset_repo_name}, names={test_dataset.dataset_names}"
+        )
+
+        all_train_X, all_train_y = load_all_ts_datasets(
+            train_dataset,
+            max_length=train_max_length,
+            preprocess_fn=filter_constant_series,
+            prefix="train",
+        )
+
+        all_test_X, all_test_y = load_all_ts_datasets(
+            test_dataset,
+            max_length=test_max_length,
+            preprocess_fn=filter_constant_series,
+            prefix="test",
+        )
+
+    return all_train_X, all_train_y, all_test_X, all_test_y
+
+
 def setup_data_loaders(
     train_datasets_collection: DatasetCollectionWithPreprocessing,
     test_datasets_collection: DatasetCollectionWithPreprocessing,
     num_workers: int = 0,
+    debug_mode: bool = False,
 ) -> Tuple[DataLoader, DataLoader]:
     """Create and configure data loaders for training and validation."""
 
@@ -145,7 +153,7 @@ def setup_data_loaders(
         train_datasets_collection,
         batch_size=1,
         collate_fn=collate_for_tabpfn_dataset,
-        shuffle=True,
+        shuffle=True if not debug_mode else False,
         num_workers=num_workers,
         persistent_workers=num_workers > 0,
     )
@@ -193,40 +201,43 @@ def setup_trainer(config: DictConfig, wandb_logger):
     return trainer, checkpoint_callback
 
 
+def setup_config(args: argparse.Namespace) -> DictConfig:
+    """Load configurations from files and override with command line arguments."""
+    experiment_config = ConfigManager.load_experiment(args.experiment)
+    base_model_config = ConfigManager.load_base_model(args.base_model_name)
+    method_config = ConfigManager.load_method(args.method)
+
+    for config in [experiment_config, base_model_config, method_config]:
+        if config is None:
+            raise ValueError(f"Failed to load configuration: {config}")
+
+    all_configs = OmegaConf.merge(experiment_config, base_model_config, method_config)
+    all_configs.experiment_name = (
+        f"{all_configs.experiment_name}-{args.base_model_name}-{args.method}"
+    )
+
+    # Update configuration with command line arguments
+    all_configs = ConfigManager.update_from_args(all_configs, args)
+
+    return all_configs
+
+
 def main():
     """Main entry point for the fine-tuning script."""
     # Load environment variables
     load_dotenv()
 
     # Parse command line arguments
-    args = parse_args()
+    args = common_parse_args()
 
     debug_mode = args.debug
 
     # Use medium mixed precision for faster training
     torch.set_float32_matmul_precision("medium")
 
-    # Load experiment configuration
-    config: DictConfig = ConfigManager.load_experiment(args.experiment)
-    if config is None:
-        logger.error(f"Failed to load experiment configuration: {args.experiment}")
-        return 1
-
-    # Override method if specified
-    if args.method:
-        method_config = ConfigManager.load_method(args.method)
-        if method_config is None:
-            logger.error(f"Failed to load method configuration: {args.method}")
-            return 1
-
-        # Update config with method settings
-        config = OmegaConf.merge(config, method_config)
-
-        # Update experiment name to reflect the method change
-        config.experiment_name = f"{config.experiment_name}-{args.method}"
-
-    # Update configuration with command line arguments
-    config = ConfigManager.update_from_args(config, args)
+    # Setup configuration
+    config = setup_config(args)
+    logger.info(f"Configuration: \n{ConfigManager.pretty_print(config)}")
 
     # Set debug logging if in debug mode
     if debug_mode:
@@ -260,44 +271,23 @@ def main():
             tags.append("resumed")
 
     # Setup Weights & Biases logger
-    wandb_logger = WandbLogger(
-        project=config.wandb_project,
-        name=config.run_name,
-        log_model=config.log_model,
-        tags=tags if tags else None,
-    )
+    if args.no_wandb:
+        logger.info("Weights & Biases logging disabled")
+        wandb_logger = None
+    else:
+        wandb_logger = WandbLogger(
+            project=config.wandb_project,
+            name=config.run_name,
+            log_model=not config.no_log_model,
+            tags=tags if tags else None,
+        )
 
-    # Log hyperparameters
-    wandb_logger.log_hyperparams(OmegaConf.to_container(config, resolve=True))
+        # Log hyperparameters
+        wandb_logger.log_hyperparams(OmegaConf.to_container(config, resolve=True))
 
-    # Initialize datasets
-    train_dataset = TabPFNTimeSeriesPretrainDataset(
-        dataset_repo_name=config.train_datasets.dataset_repo_name,
-        dataset_names=config.train_datasets.dataset_names,
-        max_context_length=config.train_datasets.max_context_length,
-        hf_cache_dir=hf_cache_dir,
-    )
-
-    test_dataset = TabPFNTimeSeriesPretrainDataset(
-        dataset_repo_name=config.test_datasets.dataset_repo_name,
-        dataset_names=config.test_datasets.dataset_names,
-        max_context_length=config.test_datasets.max_context_length,
-        hf_cache_dir=hf_cache_dir,
-    )
-
-    # Prepare dataset
-    train_max_length = 20 if debug_mode else None
-    test_max_length = 5 if debug_mode else None
-
-    all_train_X, all_train_y = load_all_ts_datasets(
-        train_dataset,
-        max_length=train_max_length,
-        preprocess_fn=filter_constant_series,
-    )
-    all_test_X, all_test_y = load_all_ts_datasets(
-        test_dataset,
-        max_length=test_max_length,
-        preprocess_fn=filter_constant_series,
+    # Setup datasets
+    all_train_X, all_train_y, all_test_X, all_test_y = setup_datasets(
+        config, debug_mode, hf_cache_dir
     )
 
     logger.info(
@@ -305,17 +295,9 @@ def main():
     )
 
     # Setup regressor
-    precision_map = {
-        "float32": torch.float32,
-        "float16": torch.float16,
-        "bfloat16": torch.bfloat16,
-    }
-
     regressor_config = {
-        "ignore_pretraining_limits": config.base_model.ignore_pretraining_limits,
-        "n_estimators": config.base_model.n_estimators,
+        **OmegaConf.to_container(config.base_model, resolve=True),
         "random_state": config.seed,
-        "inference_precision": precision_map.get(config.base_model.inference_precision),
         "device": "cuda",
     }
 
@@ -323,6 +305,8 @@ def main():
     training_config = {
         "lr": config.optimization.lr,
         "finetune_space": config.optimization.finetune_space,
+        "ignore_negative_loss": config.loss_config.ignore_negative_loss,
+        "ignore_inf_loss": config.loss_config.ignore_inf_loss,
     }
 
     # Initialize PyTorch Lightning module
@@ -350,13 +334,22 @@ def main():
     logger.info(f"Using {num_workers} workers for data loading")
 
     train_dl, val_dl = setup_data_loaders(
-        train_datasets_collection, test_datasets_collection, num_workers=num_workers
+        train_datasets_collection,
+        test_datasets_collection,
+        num_workers=num_workers,
+        debug_mode=debug_mode,
     )
 
     # Setup trainer and start training
     trainer, checkpoint_callback = setup_trainer(config, wandb_logger)
     if config.resume_from_checkpoint:
         logger.info(f"Resuming from checkpoint: {config.resume_from_checkpoint}")
+
+    # import warnings
+    # from lightning_fabric.utilities.warnings import PossibleUserWarning
+
+    # warnings.filterwarnings("error", category=UserWarning)
+    # warnings.filterwarnings("ignore", category=PossibleUserWarning)
     trainer.fit(
         lightning_model, train_dl, val_dl, ckpt_path=config.resume_from_checkpoint
     )
@@ -364,16 +357,18 @@ def main():
     # Log best model path
     if checkpoint_callback.best_model_path:
         logger.info(f"Best model saved at: {checkpoint_callback.best_model_path}")
-        wandb_logger.experiment.log(
-            {"best_model_path": checkpoint_callback.best_model_path}
-        )
+        if wandb_logger:
+            wandb_logger.experiment.log(
+                {"best_model_path": checkpoint_callback.best_model_path}
+            )
 
     # Log final skipped steps statistics
     logger.info(f"Total training steps skipped: {lightning_model.train_skipped_steps}")
     logger.info(f"Total validation steps skipped: {lightning_model.val_skipped_steps}")
 
     # Close wandb run
-    wandb_logger.experiment.finish()
+    if wandb_logger:
+        wandb_logger.experiment.finish()
 
     return 0
 

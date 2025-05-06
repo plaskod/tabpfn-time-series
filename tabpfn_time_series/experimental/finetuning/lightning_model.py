@@ -1,8 +1,7 @@
 import os
 import logging
-from typing import Any
 from dataclasses import dataclass
-
+from functools import partial
 import numpy as np
 import torch
 import pytorch_lightning as pl
@@ -27,26 +26,41 @@ TABPFN_ENABLE_FINETUNING_KWARGS = {
     "fit_mode": "batched",
 }
 
+PRECISION_MAP = {
+    "float32": torch.float32,
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
+}
+
 
 class TabPFNTimeSeriesModule(pl.LightningModule):
     """PyTorch Lightning module for TabPFN Time Series fine-tuning."""
 
     def __init__(
         self,
-        training_config: Any,
+        training_config: dict,
         tabpfn_model_config: dict,
     ):
         super().__init__()
-        self.tabpfn_model_config = tabpfn_model_config
+        self.tabpfn_model_config = self._parse_model_config(tabpfn_model_config)
         self.regressor = TabPFNRegressor(
-            **self.tabpfn_model_config, **TABPFN_ENABLE_FINETUNING_KWARGS
+            **self.tabpfn_model_config,
+            **TABPFN_ENABLE_FINETUNING_KWARGS,
         )
         self.training_config = training_config
         self.save_hyperparameters(ignore=["regressor"])
+
+        self.num_total_ignored_train_target_points = 0
+        self.num_current_epoch_ignored_train_target_points = 0
+        self.num_total_ignored_val_target_points = 0
+        self.num_current_epoch_ignored_val_target_points = 0
         self.train_skipped_steps = 0
-        self.val_skipped_steps = 0
         self.current_epoch_train_skipped = 0
+        self.val_skipped_steps = 0
         self.current_epoch_val_skipped = 0
+
+        # Log with batch size 1
+        self.log = partial(self.log, batch_size=1)
 
     def forward(self, X_tests_preprocessed):
         """Forward pass through the regressor."""
@@ -55,6 +69,7 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         """Execute a single training step."""
         # Unpack batch
+        logging.debug(f"Training step batch: {batch_idx}")
         batch_data = self._unpack_batch(batch)
         if batch_data is None:
             return None
@@ -78,6 +93,7 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
         self.regressor.fit_from_preprocessed(
             X_trains_preprocessed, y_trains_preprocessed, cat_ixs, confs
         )
+
         averaged_pred_logits, _, _ = self.forward(X_tests_preprocessed)
 
         # Calculate loss
@@ -85,20 +101,40 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
             renormalized_criterion=renormalized_criterion,
             bar_distribution=bar_distribution,
             pred_logits=averaged_pred_logits,
-            targets=y_test_standardized,
+            targets_standardized=y_test_standardized,
+            targets_raw=y_test_raw,
             prefix="train",
+            batch_idx=batch_idx,
         )
         if loss is None:
             logging.warning(f"Batch: {batch_idx}, Train loss is None")
 
             if os.environ.get("DEBUG_SAVE_RAW_DATA"):
                 self._save_debug_data(
-                    batch_idx, x_train_raw, y_train_raw, x_test_raw, y_test_raw, "train"
+                    batch_idx,
+                    x_train_raw,
+                    y_train_raw,
+                    x_test_raw,
+                    y_test_raw,
+                    "train_bad",
                 )
 
             self.train_skipped_steps += 1
             self.current_epoch_train_skipped += 1
             return None
+
+        else:
+            logging.debug(f"Batch: {batch_idx}, Train loss is {loss}")
+
+            if os.environ.get("DEBUG_SAVE_RAW_DATA"):
+                self._save_debug_data(
+                    batch_idx,
+                    x_train_raw,
+                    y_train_raw,
+                    x_test_raw,
+                    y_test_raw,
+                    "train_good",
+                )
 
         self.log("train/loss", loss, prog_bar=True)
         return loss
@@ -149,8 +185,10 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
             renormalized_criterion=renormalized_criterion,
             bar_distribution=bar_distribution,
             pred_logits=averaged_pred_logits,
-            targets=y_test_standardized,
+            targets_standardized=y_test_standardized,
+            targets_raw=y_test_raw,
             prefix="val",
+            batch_idx=batch_idx,
         )
         if loss is None:
             logging.warning("Validation loss is None")
@@ -237,55 +275,61 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
             logging.error(f"Error unpacking batch: {e}")
             return None
 
-    def _check_numerical_issues(self, tensor, prefix):
-        """Check for NaN/Inf values in tensors."""
-        has_issues = False
-
-        if torch.isnan(tensor).any():
-            logging.warning(f"NaN detected in {prefix} tensor")
-            self.log(f"{prefix}/nan_detected", 1.0)
-            has_issues = True
-
-        if torch.isinf(tensor).any():
-            logging.warning(f"Inf detected in {prefix} tensor")
-            self.log(f"{prefix}/inf_detected", 1.0)
-            has_issues = True
-
-        return has_issues
-
     def _calculate_loss(
         self,
         renormalized_criterion,
         bar_distribution,
         pred_logits,
-        targets,
+        targets_standardized,
+        targets_raw,
         prefix,
+        batch_idx,
     ):
         """Calculate loss and handle numerical issues."""
 
         # Select loss function based on optimization space
         if self.training_config["finetune_space"] == "raw":
             loss_fn = renormalized_criterion
+            targets = targets_raw
         elif self.training_config["finetune_space"] == "preprocessed":
             loss_fn = bar_distribution
+            targets = targets_standardized
         else:
             raise ValueError(
                 f"Invalid optimization space: {self.training_config['finetune_space']}"
             )
 
-        nll_loss_per_sample = loss_fn(pred_logits, targets.to(self.device))
-        loss = nll_loss_per_sample.mean()
+        nll_loss_per_sample, ignore_loss_mask = loss_fn(
+            pred_logits,
+            targets.to(self.device),
+            ignore_negative_loss=self.training_config["ignore_negative_loss"],
+            ignore_inf_loss=self.training_config["ignore_inf_loss"],
+        )
+        loss = nll_loss_per_sample[~ignore_loss_mask].mean()
 
-        # Skip infinite loss values
+        if torch.sum(ignore_loss_mask) > 0:
+            num_ignored_points = torch.sum(ignore_loss_mask).item()
+            logging.warning(
+                f"Batch {batch_idx}, {prefix} step ignored {num_ignored_points} target points"
+            )
+            if prefix == "train":
+                self.log("train/ignored_points", num_ignored_points)
+                self.num_current_epoch_ignored_train_target_points += num_ignored_points
+                self.num_total_ignored_train_target_points += num_ignored_points
+            elif prefix == "val":
+                self.log("val/ignored_points", num_ignored_points)
+                self.num_current_epoch_ignored_val_target_points += num_ignored_points
+                self.num_total_ignored_val_target_points += num_ignored_points
+
         if torch.isinf(loss).any():
             self.log(f"{prefix}/inf_loss_detected", 1.0)
+            logging.warning(f"Batch {batch_idx}, {prefix} step detected inf loss")
             if prefix == "train":
                 self.train_skipped_steps += 1
                 self.current_epoch_train_skipped += 1
             else:
                 self.val_skipped_steps += 1
                 self.current_epoch_val_skipped += 1
-            return None
 
         return loss
 
@@ -305,20 +349,35 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
 
     def on_train_epoch_end(self):
         """Log training statistics at the end of each epoch."""
-        self.log("train/skipped_steps_epoch", self.current_epoch_train_skipped)
-        self.log("train/total_skipped_steps", self.train_skipped_steps)
-        logging.info(
-            f"Epoch {self.current_epoch}: Skipped {self.current_epoch_train_skipped} training steps"
+        self.log(
+            "train/total_ignored_target_points",
+            self.num_total_ignored_train_target_points,
         )
+        self.log(
+            "train/epoch_ignored_target_points",
+            self.num_current_epoch_ignored_train_target_points,
+        )
+        self.num_current_epoch_ignored_train_target_points = 0
+
+        self.log("train/skipped_steps", self.train_skipped_steps)
+        self.log("train/skipped_epochs", self.current_epoch_train_skipped)
+        self.train_skipped_steps = 0
         self.current_epoch_train_skipped = 0
 
     def on_validation_epoch_end(self):
         """Log validation statistics at the end of each epoch."""
-        self.log("val/skipped_steps_epoch", self.current_epoch_val_skipped)
-        self.log("val/total_skipped_steps", self.val_skipped_steps)
-        logging.info(
-            f"Epoch {self.current_epoch}: Skipped {self.current_epoch_val_skipped} validation steps"
+        self.log(
+            "val/total_ignored_target_points", self.num_total_ignored_val_target_points
         )
+        self.log(
+            "val/epoch_ignored_target_points",
+            self.num_current_epoch_ignored_val_target_points,
+        )
+        self.num_current_epoch_ignored_val_target_points = 0
+
+        self.log("val/skipped_steps", self.val_skipped_steps)
+        self.log("val/skipped_epochs", self.current_epoch_val_skipped)
+        self.val_skipped_steps = 0
         self.current_epoch_val_skipped = 0
 
     def configure_optimizers(self):
@@ -327,15 +386,15 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
             self.regressor.model_.parameters(), lr=self.training_config["lr"]
         )
 
+    @staticmethod
     def _save_debug_data(
-        self, batch_idx, x_train_raw, y_train_raw, x_test_raw, y_test_raw, prefix
+        batch_idx, x_train_raw, y_train_raw, x_test_raw, y_test_raw, prefix
     ):
         """Save debug data to CSV files."""
-        import os
         import pandas as pd
 
         # Create debug directory if it doesn't exist
-        debug_dir = os.path.join("debug_bad_data", prefix, f"batch_{batch_idx}")
+        debug_dir = os.path.join("debug_bad_data_new", prefix, f"batch_{batch_idx}")
         os.makedirs(debug_dir, exist_ok=True)
 
         # Save raw data to CSV files
@@ -349,3 +408,11 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
         pd.DataFrame(y_test_raw.cpu()).to_csv(os.path.join(debug_dir, "y_test_raw.csv"))
 
         logging.info(f"Saved debug data for batch {batch_idx} to {debug_dir}")
+
+    @staticmethod
+    def _parse_model_config(raw_model_config: dict) -> dict:
+        new_model_config = raw_model_config.copy()
+        new_model_config["inference_precision"] = PRECISION_MAP[
+            raw_model_config["inference_precision"]
+        ]
+        return new_model_config

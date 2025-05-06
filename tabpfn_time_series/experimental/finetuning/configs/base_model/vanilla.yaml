@@ -1,0 +1,12 @@
+base_model:
+  n_estimators: 8
+  inference_precision: float32
+  ignore_pretraining_limits: true
+  inference_config:
+    REGRESSION_Y_PREPROCESS_TRANSFORMS:
+      - null
+      - safepower
+
+loss_config:
+  ignore_negative_loss: false
+  ignore_inf_loss: false

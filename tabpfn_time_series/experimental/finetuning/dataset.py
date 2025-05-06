@@ -242,6 +242,7 @@ def load_all_ts_datasets(
     shuffle: bool = False,
     max_length: int = None,
     preprocess_fn: Callable[[XType, YType], Tuple[XType, YType]] = None,
+    prefix: str = None,
 ) -> Tuple[list[XType], list[YType]]:
     """
     Load all time series datasets efficiently with minimal memory copying
@@ -258,9 +259,14 @@ def load_all_ts_datasets(
         all_y is a list of Series
     """
     # Automatically set num_workers to the number of available CPU cores
-    num_workers = min(os.cpu_count(), 8)  # Cap at 8 workers to avoid overhead
+    num_workers = max(os.cpu_count() - 1, 1)
     batch_size = 128
     prefetch_factor = 4
+
+    # Adjust batch size and prefetch_factor if max_length is specified
+    if max_length is not None:
+        batch_size = min(128, max_length)
+        prefetch_factor = 4 if max_length > 1000 else None
 
     # Pre-allocate lists with known capacity to avoid resizing
     all_X, all_y = [], []
@@ -317,12 +323,12 @@ def load_all_ts_datasets(
 
     # Optional debugging: Save dataset to CSV files if debug flag is set
     if os.environ.get("DEBUG_SAVE_RAW_DATA"):
-        save_data_into_csvs(all_X, all_y)
+        save_data_into_csvs(all_X, all_y, prefix=prefix)
 
     return all_X, all_y
 
 
-def save_data_into_csvs(all_X, all_y):
+def save_data_into_csvs(all_X, all_y, prefix: str = None):
     """
     Save dataset to CSV files for debugging purposes.
 
@@ -346,11 +352,11 @@ def save_data_into_csvs(all_X, all_y):
             all_X_df.append(X_copy)
             all_y_df.append(y_copy)
 
-        pd.concat(all_X_df).to_csv("debug_all_X.csv", index=False)
-        logger.debug("Saved features to debug_all_X.csv")
+        pd.concat(all_X_df).to_csv(f"{prefix}_debug_all_X.csv", index=False)
+        logger.debug(f"Saved features to {prefix}_debug_all_X.csv")
 
-        pd.concat(all_y_df).to_csv("debug_all_y.csv", index=False)
-        logger.debug("Saved targets to debug_all_y.csv")
+        pd.concat(all_y_df).to_csv(f"{prefix}_debug_all_y.csv", index=False)
+        logger.debug(f"Saved targets to {prefix}_debug_all_y.csv")
 
     except Exception as e:
         logger.warning(f"Failed to save debug CSV files: {e}")

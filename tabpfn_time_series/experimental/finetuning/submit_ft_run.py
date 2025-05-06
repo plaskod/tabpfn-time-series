@@ -8,72 +8,41 @@ import submitit
 from datetime import datetime
 from pathlib import Path
 
+from tabpfn_time_series.experimental.finetuning.run_ft_args import common_parse_args
+
 SCRIPT_PATH = Path(__file__).parent / "run_ft.py"
 
 
 def parse_args():
+    # First get the base parser from run_ft.py
+    ft_parser = common_parse_args(return_parser=True)
+
+    # Create a new parser for submitit-specific arguments
     parser = argparse.ArgumentParser(
-        description="Submit run_ft.py as an SBATCH job using submitit"
+        description="Submit run_ft.py as an SBATCH job using submitit",
+        parents=[ft_parser],  # Inherit all arguments from run_ft.py
+        conflict_handler="resolve",  # Handle any conflicts
     )
-    # SLURM job parameters
-    parser.add_argument(
+
+    # Add SLURM job parameters
+    slurm_group = parser.add_argument_group("SLURM Parameters")
+    slurm_group.add_argument(
         "--job_name", type=str, default="tabpfn-ts-ft", help="Name for the SLURM job"
     )
-    parser.add_argument(
+    slurm_group.add_argument(
         "--partition", type=str, default="gpua100", help="SLURM partition to use"
     )
-    parser.add_argument(
+    slurm_group.add_argument(
         "--time", type=int, default=24, help="Maximum job runtime in hours"
     )
-    parser.add_argument("--mem", type=int, default=64, help="Memory allocation in GB")
-    parser.add_argument("--gpus", type=int, default=1, help="Number of GPUs to request")
-    parser.add_argument("--cpus", type=int, default=6, help="Number of CPUs to request")
-
-    # run_ft.py parameters
-    parser.add_argument(
-        "--experiment",
-        type=str,
-        required=True,
-        help="Name of the experiment configuration to use",
+    slurm_group.add_argument(
+        "--mem", type=int, default=64, help="Memory allocation in GB"
     )
-    parser.add_argument(
-        "--method", type=str, help="Name of the method configuration to use"
+    slurm_group.add_argument(
+        "--gpus", type=int, default=1, help="Number of GPUs to request"
     )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda",
-        help="Device to use for training (cuda or cpu)",
-    )
-    parser.add_argument("--seed", type=int, help="Random seed for reproducibility")
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Run in debug mode with reduced dataset size",
-    )
-    parser.add_argument(
-        "--num_workers", type=int, help="Number of worker processes for data loading"
-    )
-    parser.add_argument(
-        "--wandb_project",
-        type=str,
-        default="tabpfn-ts-ft",
-        help="Weights & Biases project name",
-    )
-    parser.add_argument("--run_name", type=str, help="Custom name for the W&B run")
-    parser.add_argument("--tags", type=str, nargs="+", help="Tags for the W&B run")
-    parser.add_argument(
-        "--max_epochs", type=int, help="Maximum number of epochs to train"
-    )
-    parser.add_argument("--lr", type=float, help="Learning rate")
-    parser.add_argument(
-        "--train_datasets", type=str, nargs="+", help="Names of training datasets"
-    )
-    parser.add_argument(
-        "--test_datasets", type=str, nargs="+", help="Names of test datasets"
-    )
-    parser.add_argument(
-        "--log_model", type=bool, default=True, help="Log the model to Weights & Biases"
+    slurm_group.add_argument(
+        "--cpus", type=int, default=6, help="Number of CPUs to request"
     )
 
     return parser.parse_args()
@@ -94,48 +63,29 @@ class TrainingJob:
         # Construct command to run run_ft.py
         cmd = [sys.executable, "-u", str(SCRIPT_PATH)]
 
-        # Add all arguments that were passed
-        if self.args.experiment:
-            cmd.extend(["--experiment", self.args.experiment])
+        # Add all arguments that were passed, excluding SLURM-specific ones
+        slurm_args = {"job_name", "partition", "time", "mem", "gpus", "cpus"}
 
-        if self.args.method:
-            cmd.extend(["--method", self.args.method])
+        # Get all arguments from the namespace
+        for arg_name, arg_value in vars(self.args).items():
+            # Skip SLURM-specific arguments
+            if arg_name in slurm_args:
+                continue
 
-        if self.args.device:
-            cmd.extend(["--device", self.args.device])
+            # Skip None values
+            if arg_value is None:
+                continue
 
-        if self.args.seed is not None:
-            cmd.extend(["--seed", str(self.args.seed)])
-
-        if self.args.debug:
-            cmd.append("--debug")
-
-        if self.args.num_workers is not None:
-            cmd.extend(["--num_workers", str(self.args.num_workers)])
-
-        if self.args.wandb_project:
-            cmd.extend(["--wandb_project", self.args.wandb_project])
-
-        if self.args.run_name:
-            cmd.extend(["--run_name", self.args.run_name])
-
-        if self.args.tags:
-            cmd.extend(["--tags"] + self.args.tags)
-
-        if self.args.max_epochs is not None:
-            cmd.extend(["--max_epochs", str(self.args.max_epochs)])
-
-        if self.args.lr is not None:
-            cmd.extend(["--lr", str(self.args.lr)])
-
-        if self.args.train_datasets:
-            cmd.extend(["--train_datasets"] + self.args.train_datasets)
-
-        if self.args.test_datasets:
-            cmd.extend(["--test_datasets"] + self.args.test_datasets)
-
-        if self.args.log_model is not None:
-            cmd.extend(["--log_model", str(self.args.log_model)])
+            # Handle boolean flags
+            if isinstance(arg_value, bool):
+                if arg_value:
+                    cmd.append(f"--{arg_name}")
+            # Handle lists (like tags, train_datasets, etc.)
+            elif isinstance(arg_value, list):
+                cmd.extend([f"--{arg_name}"] + [str(v) for v in arg_value])
+            # Handle all other arguments
+            else:
+                cmd.extend([f"--{arg_name}", str(arg_value)])
 
         # Execute the command
         import subprocess

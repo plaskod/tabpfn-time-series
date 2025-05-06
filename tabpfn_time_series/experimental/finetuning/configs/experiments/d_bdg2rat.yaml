@@ -6,14 +6,7 @@ seed: 0
 train_datasets:
   dataset_repo_name: liamsbhoo/GiftEvalPretrain
   dataset_names:
-    - bdg-2_panther
     - bdg-2_rat
-    - bdg-2_bear
-    - lcl
-    - smart
-    - ideal
-    - sceaux
-    - borealis
   max_context_length: 1024
   prediction_length: 100
 
