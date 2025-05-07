@@ -83,10 +83,20 @@ def setup_datasets(
         hf_cache_dir=hf_cache_dir,
     )
 
-    train_max_length = 10 if debug_mode else None
-    test_max_length = 5 if debug_mode else None
+    # Get dataset length limits from config or use defaults
+    train_max_length = config.get("train_max_length", None)
+    test_max_length = config.get("test_max_length", None)
 
-    if config.use_train_datasets_only:
+    # Override with debug values if in debug mode
+    if debug_mode:
+        train_max_length = 2
+        test_max_length = 1
+
+    logger.debug(
+        f"Using train_max_length={train_max_length}, test_max_length={test_max_length}"
+    )
+
+    if config.split_train_to_val or config.use_train_as_val:
         logger.info("Loading train datasets only")
         logger.info(
             f"Train dataset: repo={train_dataset.dataset_repo_name}, names={train_dataset.dataset_names}"
@@ -94,15 +104,20 @@ def setup_datasets(
 
         all_X, all_y = load_all_ts_datasets(
             train_dataset,
+            shuffle=True,
             max_length=train_max_length,
             preprocess_fn=filter_constant_series,
             prefix="train",
         )
 
         # Split into train and test sets
-        all_train_X, all_test_X, all_train_y, all_test_y = train_test_split(
-            all_X, all_y, test_size=0.2, random_state=config.seed
-        )
+        if config.split_train_to_val:
+            all_train_X, all_test_X, all_train_y, all_test_y = train_test_split(
+                all_X, all_y, test_size=0.2, random_state=config.seed
+            )
+        elif config.use_train_as_val:
+            all_train_X, all_train_y = all_X, all_y
+            all_test_X, all_test_y = all_train_X, all_train_y
 
     else:
         logger.info("Loading train and test datasets")
@@ -123,6 +138,7 @@ def setup_datasets(
 
         all_train_X, all_train_y = load_all_ts_datasets(
             train_dataset,
+            shuffle=True,
             max_length=train_max_length,
             preprocess_fn=filter_constant_series,
             prefix="train",
@@ -130,6 +146,7 @@ def setup_datasets(
 
         all_test_X, all_test_y = load_all_ts_datasets(
             test_dataset,
+            shuffle=True,
             max_length=test_max_length,
             preprocess_fn=filter_constant_series,
             prefix="test",
@@ -153,7 +170,7 @@ def setup_data_loaders(
         train_datasets_collection,
         batch_size=1,
         collate_fn=collate_for_tabpfn_dataset,
-        shuffle=True if not debug_mode else False,
+        shuffle=False,  # Already shuffled in the dataset
         num_workers=num_workers,
         persistent_workers=num_workers > 0,
     )
@@ -321,12 +338,19 @@ def main():
         all_train_y,
         partial(ts_splitfn, prediction_length=config.train_datasets.prediction_length),
         max_data_size=config.tabpfn_split_max_data_size,
+        override_random_state=config.seed,
     )
     test_datasets_collection = lightning_model.regressor.get_preprocessed_datasets(
         all_test_X,
         all_test_y,
-        partial(ts_splitfn, prediction_length=config.test_datasets.prediction_length),
+        partial(
+            ts_splitfn,
+            prediction_length=config.test_datasets.prediction_length
+            if hasattr(config, "test_datasets")
+            else config.train_datasets.prediction_length,
+        ),
         max_data_size=config.tabpfn_split_max_data_size,
+        override_random_state=config.seed,
     )
 
     # Setup data loaders

@@ -82,15 +82,16 @@ def common_parse_args(return_parser: bool = False) -> Namespace | ArgumentParser
 
     # Dataset settings
     parser.add_argument(
-        "--train_datasets", type=str, nargs="+", help="Names of training datasets"
-    )
-    parser.add_argument(
-        "--test_datasets", type=str, nargs="+", help="Names of test datasets"
-    )
-    parser.add_argument(
-        "--use_train_datasets_only",
+        "--split_train_to_val",
         action="store_true",
+        default=None,  # to not overwrite the experiment config when not provided
         help="Split datasets into train and test sets using only training datasets",
+    )
+    parser.add_argument(
+        "--use_train_as_val",
+        action="store_true",
+        default=None,  # to not overwrite the experiment config when not provided
+        help="Use training datasets for validation instead of test datasets",
     )
 
     if return_parser:

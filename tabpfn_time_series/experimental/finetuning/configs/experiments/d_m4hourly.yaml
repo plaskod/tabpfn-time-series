@@ -1,0 +1,17 @@
+experiment_name: mini
+tags:
+  - mini
+seed: 0
+
+# train and test on 10 time series only
+use_train_as_val: true
+train_max_length: 8
+
+train_datasets:
+  dataset_repo_name: liamsbhoo/GiftEval
+  dataset_names:
+    - m4_hourly
+  max_context_length: 1024
+  prediction_length: 50
+
+tabpfn_split_max_data_size: 10000 

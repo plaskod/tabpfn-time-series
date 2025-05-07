@@ -8,7 +8,6 @@ import pytorch_lightning as pl
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 from tabpfn import TabPFNRegressor
-from tabpfn.regressor import _logits_to_output
 from tabpfn.finetune_utils import _prepare_eval_model
 
 
@@ -26,10 +25,11 @@ TABPFN_ENABLE_FINETUNING_KWARGS = {
     "fit_mode": "batched",
 }
 
+TABPFN_FINETUNING_FIXED_BATCH_SIZE = 1
+
 PRECISION_MAP = {
     "float32": torch.float32,
     "float16": torch.float16,
-    "bfloat16": torch.bfloat16,
 }
 
 
@@ -59,6 +59,8 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
         self.val_skipped_steps = 0
         self.current_epoch_val_skipped = 0
 
+        self.eval_model = None
+
         # Log with batch size 1
         self.log = partial(self.log, batch_size=1)
 
@@ -72,7 +74,7 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
         logging.debug(f"Training step batch: {batch_idx}")
         batch_data = self._unpack_batch(batch)
         if batch_data is None:
-            return None
+            raise ValueError(f"Batch {batch_idx} is None")
 
         (
             X_trains_preprocessed,
@@ -88,6 +90,9 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
             x_train_raw,
             y_train_raw,
         ) = batch_data
+
+        # Debug compute hash of the data
+        # self._report_batch_hash(batch_data)
 
         # Forward pass
         self.regressor.fit_from_preprocessed(
@@ -136,7 +141,7 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
                     "train_good",
                 )
 
-        self.log("train/loss", loss, prog_bar=True)
+        self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -161,66 +166,95 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
             y_train_raw,
         ) = batch_data
 
-        # Get a copy of TabPFNRegressor
-        # Need to use FINETUNING mode to allow loss calculation
-        eval_model = _prepare_eval_model(
-            original_model=self.regressor,
-            eval_init_args={
-                **self.tabpfn_model_config,
-                **TABPFN_ENABLE_FINETUNING_KWARGS,
-            },
-            model_class=TabPFNRegressor,
-        )
+        # # Get a copy of TabPFNRegressor
+        # # Need to use FINETUNING mode to allow loss calculation
+        # eval_model = _prepare_eval_model(
+        #     original_model=self.regressor,
+        #     eval_init_args={
+        #         **self.tabpfn_model_config,
+        #         **TABPFN_ENABLE_FINETUNING_KWARGS,
+        #     },
+        #     model_class=TabPFNRegressor,
+        # )
 
-        # Forward pass
-        eval_model.fit_from_preprocessed(
-            X_trains_preprocessed, y_trains_preprocessed, cat_ixs, confs
-        )
-        averaged_pred_logits, individual_pred_logits, borders = eval_model.forward(
-            X_tests_preprocessed,
-        )
+        # # Forward pass
+        # eval_model.fit_from_preprocessed(
+        #     X_trains_preprocessed, y_trains_preprocessed, cat_ixs, confs
+        # )
+        # averaged_pred_logits, individual_pred_logits, borders = eval_model.forward(
+        #     X_tests_preprocessed,
+        # )
 
-        # Calculate loss
-        loss = self._calculate_loss(
-            renormalized_criterion=renormalized_criterion,
-            bar_distribution=bar_distribution,
-            pred_logits=averaged_pred_logits,
-            targets_standardized=y_test_standardized,
-            targets_raw=y_test_raw,
-            prefix="val",
-            batch_idx=batch_idx,
-        )
-        if loss is None:
-            logging.warning("Validation loss is None")
-            return None
+        # # Calculate loss
+        # loss = self._calculate_loss(
+        #     renormalized_criterion=renormalized_criterion,
+        #     bar_distribution=bar_distribution,
+        #     pred_logits=averaged_pred_logits,
+        #     targets_standardized=y_test_standardized,
+        #     targets_raw=y_test_raw,
+        #     prefix="val",
+        #     batch_idx=batch_idx,
+        # )
+        # if loss is None:
+        #     logging.warning("Validation loss is None")
+        #     return None
 
-        # Transform logits to target
-        transformed_logits = self.regressor.transform_logits(
-            outputs=individual_pred_logits,
-            borders=borders,
-            bardist_borders=self.regressor.bardist_.borders,
-            device=self.device,
+        # # Transform logits to target
+        # transformed_logits = self.regressor.transform_logits(
+        #     outputs=individual_pred_logits,
+        #     borders=borders,
+        #     bardist_borders=self.regressor.bardist_.borders,
+        #     device=self.device,
+        # )
+        # median_pred = _logits_to_output(
+        #     output_type="median",
+        #     logits=transformed_logits,
+        #     criterion=renormalized_criterion.cpu(),
+        #     quantiles=None,
+        # )
+
+        x_train_raw_numpy = x_train_raw.cpu().numpy()
+        y_train_raw_numpy = y_train_raw.cpu().numpy()
+        x_test_raw_numpy = x_test_raw.cpu().numpy()
+        y_test_raw_numpy = y_test_raw.cpu().numpy()
+
+        self.eval_model.fit(x_train_raw_numpy, y_train_raw_numpy)
+        median_pred_on_train = self.eval_model.predict(
+            x_train_raw_numpy, output_type="median"
         )
-        median_pred = _logits_to_output(
-            output_type="median",
-            logits=transformed_logits,
-            criterion=renormalized_criterion.cpu(),
-            quantiles=None,
+        median_pred_on_test = self.eval_model.predict(
+            x_test_raw_numpy, output_type="median"
         )
 
         # Calculate regression metrics
-        metrics = self._calculate_regression_metrics(
-            median_predictions=median_pred,
-            y_test=y_test_raw.cpu().numpy(),
+        metrics_in_sample = self._calculate_regression_metrics(
+            median_predictions=median_pred_on_train,
+            y_test=y_train_raw_numpy,
+        )
+        metrics_out_of_sample = self._calculate_regression_metrics(
+            median_predictions=median_pred_on_test,
+            y_test=y_test_raw_numpy,
         )
 
         # Log metrics
-        self.log("val/mse", metrics.mse, on_epoch=True, batch_size=1)
-        self.log("val/mae", metrics.mae, on_epoch=True, batch_size=1)
-        self.log("val/r2", metrics.r2, on_epoch=True, batch_size=1)
-        self.log("val/loss", loss, on_epoch=True, batch_size=1)
+        for prefix, metrics in zip(
+            ["in_sample", "out_of_sample"], [metrics_in_sample, metrics_out_of_sample]
+        ):
+            self.log(f"val/{prefix}/mse", metrics.mse, on_epoch=True, batch_size=1)
+            self.log(f"val/{prefix}/mae", metrics.mae, on_epoch=True, batch_size=1)
+            self.log(f"val/{prefix}/r2", metrics.r2, on_epoch=True, batch_size=1)
 
-        return {"loss": loss, "mse": metrics.mse, "mae": metrics.mae, "r2": metrics.r2}
+        # self.log("val/loss", loss, on_epoch=True, batch_size=1)
+
+        # return {"loss": loss, "mse": metrics.mse, "mae": metrics.mae, "r2": metrics.r2}
+        return {
+            "mse_in_sample": metrics_in_sample.mse,
+            "mae_in_sample": metrics_in_sample.mae,
+            "r2_in_sample": metrics_in_sample.r2,
+            "mse_out_of_sample": metrics_out_of_sample.mse,
+            "mae_out_of_sample": metrics_out_of_sample.mae,
+            "r2_out_of_sample": metrics_out_of_sample.r2,
+        }
 
     def _unpack_batch(self, batch):
         """Unpack and preprocess batch data."""
@@ -240,19 +274,19 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
                 batch_y_train_raw,
             ) = batch
 
-            assert len(renormalized_criterion) == 1
+            assert len(renormalized_criterion) == TABPFN_FINETUNING_FIXED_BATCH_SIZE
             renormalized_criterion = renormalized_criterion[0]
 
-            assert len(bar_distribution) == 1
+            assert len(bar_distribution) == TABPFN_FINETUNING_FIXED_BATCH_SIZE
             bar_distribution = bar_distribution[0]
 
-            assert batch_x_test_raw.shape[0] == 1
-            assert batch_y_test_raw.shape[0] == 1
+            assert batch_x_test_raw.shape[0] == TABPFN_FINETUNING_FIXED_BATCH_SIZE
+            assert batch_y_test_raw.shape[0] == TABPFN_FINETUNING_FIXED_BATCH_SIZE
             x_test_raw = batch_x_test_raw[0]
             y_test_raw = batch_y_test_raw[0]
 
-            assert batch_x_train_raw.shape[0] == 1
-            assert batch_y_train_raw.shape[0] == 1
+            assert batch_x_train_raw.shape[0] == TABPFN_FINETUNING_FIXED_BATCH_SIZE
+            assert batch_y_train_raw.shape[0] == TABPFN_FINETUNING_FIXED_BATCH_SIZE
             x_train_raw = batch_x_train_raw[0]
             y_train_raw = batch_y_train_raw[0]
 
@@ -364,6 +398,14 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
         self.train_skipped_steps = 0
         self.current_epoch_train_skipped = 0
 
+    def on_validation_epoch_start(self):
+        """Prepare evaluation model at the start of each validation epoch."""
+        self.eval_model = _prepare_eval_model(
+            original_model=self.regressor,
+            eval_init_args=self.tabpfn_model_config,
+            model_class=TabPFNRegressor,
+        )
+
     def on_validation_epoch_end(self):
         """Log validation statistics at the end of each epoch."""
         self.log(
@@ -416,3 +458,117 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
             raw_model_config["inference_precision"]
         ]
         return new_model_config
+
+    def _compute_param_hash(self):
+        """Compute a hash of all model parameters."""
+        param_tensors = []
+        for _, param in self.regressor.model_.named_parameters():
+            param_tensors.append(param.detach().cpu().numpy().tobytes())
+
+        import hashlib
+
+        combined = b"".join(param_tensors)
+        return hashlib.md5(combined).hexdigest()
+
+    def _report_batch_hash(self, batch_data):
+        """Compute a hash of preprocessed training and testing data to track if the same data is being processed across epochs."""
+        import hashlib
+
+        if batch_data is None:
+            return "None"
+
+        (
+            X_trains_preprocessed,
+            X_tests_preprocessed,
+            y_trains_preprocessed,
+            y_test_standardized,
+            cat_ixs,
+            confs,
+            renormalized_criterion,
+            bar_distribution,
+            x_test_raw,
+            y_test_raw,
+            x_train_raw,
+            y_train_raw,
+        ) = batch_data
+
+        # Hash X_trains_preprocessed (list of tensors)
+        x_train_hash = []
+        for i, x_train in enumerate(X_trains_preprocessed):
+            x_train_bytes = x_train.detach().cpu().numpy().tobytes()
+            x_train_hash.append(x_train_bytes)
+            logging.info(
+                f"Hash for x_train[{i}]: {hashlib.md5(x_train_bytes).hexdigest()}"
+            )
+
+        # Hash y_trains_preprocessed (list of tensors)
+        y_train_hash = []
+        for y_train in y_trains_preprocessed:
+            y_train_hash.append(y_train.detach().cpu().numpy().tobytes())
+
+        # Hash X_tests_preprocessed
+        x_test_hash = []
+        for i, x_test in enumerate(X_tests_preprocessed):
+            x_test_hash.append(x_test.detach().cpu().numpy().tobytes())
+            logging.info(
+                f"Hash for x_test[{i}]: {hashlib.md5(x_test.detach().cpu().numpy().tobytes()).hexdigest()}"
+            )
+
+        # Hash y_test_standardized
+        y_test_hash = []
+        for y_test in y_test_standardized:
+            y_test_hash.append(y_test.detach().cpu().numpy().tobytes())
+
+        # Hash x_train_raw
+        x_train_raw_hash = x_train_raw.detach().cpu().numpy().tobytes()
+        logging.info(
+            f"Hash for x_train_raw: {hashlib.md5(x_train_raw_hash).hexdigest()}"
+        )
+
+        # Hash x_test_raw
+        x_test_raw_hash = x_test_raw.detach().cpu().numpy().tobytes()
+        logging.info(f"Hash for x_test_raw: {hashlib.md5(x_test_raw_hash).hexdigest()}")
+
+        # Hash y_train_raw
+        y_train_raw_hash = y_train_raw.detach().cpu().numpy().tobytes()
+        logging.info(
+            f"Hash for y_train_raw: {hashlib.md5(y_train_raw_hash).hexdigest()}"
+        )
+
+        # Hash y_test_raw
+        y_test_raw_hash = y_test_raw.detach().cpu().numpy().tobytes()
+        logging.info(f"Hash for y_test_raw: {hashlib.md5(y_test_raw_hash).hexdigest()}")
+
+        # Hash cat_ixs (could be None or a list)
+        cat_ixs_hash = []
+        if cat_ixs is not None:
+            if isinstance(cat_ixs, list):
+                for cat_ix in cat_ixs:
+                    if cat_ix is not None:
+                        cat_ixs_hash.append(str(cat_ix).encode())
+            else:
+                cat_ixs_hash.append(str(cat_ixs).encode())
+
+        # Hash confs (ensemble configurations)
+        from tabpfn.preprocessing import RegressorEnsembleConfig
+
+        confs_hash = []
+        if confs is not None:
+            if isinstance(confs, list):
+                for conf in confs:
+                    if isinstance(conf, RegressorEnsembleConfig):
+                        confs_hash.append(str(conf.__dict__).encode())
+                    else:
+                        confs_hash.append(str(conf).encode())
+            else:
+                confs_hash.append(str(confs).encode())
+
+        for name, data in [
+            ("x_train", x_train_hash),
+            ("y_train", y_train_hash),
+            ("x_test", x_test_hash),
+            ("y_test", y_test_hash),
+            ("cat_ixs", cat_ixs_hash),
+            ("confs", confs_hash),
+        ]:
+            logging.info(f"Hash for {name}: {hashlib.md5(b''.join(data)).hexdigest()}")
