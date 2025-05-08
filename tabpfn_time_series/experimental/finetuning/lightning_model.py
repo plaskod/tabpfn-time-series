@@ -5,7 +5,9 @@ from functools import partial
 import numpy as np
 import torch
 import pytorch_lightning as pl
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.metrics import mean_absolute_error, r2_score
+from gluonts.evaluation.metrics import smape, mse
+from tabpfn_time_series.experimental.finetuning.metrics import nmae
 
 from tabpfn import TabPFNRegressor
 from tabpfn.finetune_utils import _prepare_eval_model
@@ -18,6 +20,8 @@ class EvalResult:
     mse: float
     mae: float
     r2: float
+    smape: float
+    nmae: float
 
 
 TABPFN_ENABLE_FINETUNING_KWARGS = {
@@ -60,7 +64,6 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
         self.current_epoch_val_skipped = 0
 
         self.eval_model = None
-
         # Log with batch size 1
         self.log = partial(self.log, batch_size=1)
 
@@ -129,19 +132,14 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
             return None
 
         else:
-            logging.debug(f"Batch: {batch_idx}, Train loss is {loss}")
+            logging.debug(
+                f"Current epoch: {self.current_epoch}, batch: {batch_idx}, train loss: {loss}"
+            )
 
-            if os.environ.get("DEBUG_SAVE_RAW_DATA"):
-                self._save_debug_data(
-                    batch_idx,
-                    x_train_raw,
-                    y_train_raw,
-                    x_test_raw,
-                    y_test_raw,
-                    "train_good",
-                )
+        # Only log if loss is finite
+        if not torch.isinf(loss).any():
+            self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
 
-        self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -219,42 +217,42 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
         y_test_raw_numpy = y_test_raw.cpu().numpy()
 
         self.eval_model.fit(x_train_raw_numpy, y_train_raw_numpy)
-        median_pred_on_train = self.eval_model.predict(
-            x_train_raw_numpy, output_type="median"
+        full_pred_on_train = self.eval_model.predict(
+            x_train_raw_numpy, output_type="full"
         )
-        median_pred_on_test = self.eval_model.predict(
-            x_test_raw_numpy, output_type="median"
+        full_pred_on_test = self.eval_model.predict(
+            x_test_raw_numpy, output_type="full"
         )
 
         # Calculate regression metrics
         metrics_in_sample = self._calculate_regression_metrics(
-            median_predictions=median_pred_on_train,
+            median_predictions=full_pred_on_train,
             y_test=y_train_raw_numpy,
         )
         metrics_out_of_sample = self._calculate_regression_metrics(
-            median_predictions=median_pred_on_test,
+            median_predictions=full_pred_on_test,
             y_test=y_test_raw_numpy,
         )
 
-        # Log metrics
+        # Log metrics and prepare return dictionary
+        result_dict = {}
         for prefix, metrics in zip(
             ["in_sample", "out_of_sample"], [metrics_in_sample, metrics_out_of_sample]
         ):
-            self.log(f"val/{prefix}/mse", metrics.mse, on_epoch=True, batch_size=1)
-            self.log(f"val/{prefix}/mae", metrics.mae, on_epoch=True, batch_size=1)
-            self.log(f"val/{prefix}/r2", metrics.r2, on_epoch=True, batch_size=1)
+            for field_name in EvalResult.__dataclass_fields__:
+                field_value = getattr(metrics, field_name)
+                self.log(
+                    f"val/{prefix}/{field_name}",
+                    field_value,
+                    on_step=True,
+                    on_epoch=True,
+                    batch_size=1,
+                )
+                result_dict[f"{field_name}_{prefix}"] = field_value
 
         # self.log("val/loss", loss, on_epoch=True, batch_size=1)
 
-        # return {"loss": loss, "mse": metrics.mse, "mae": metrics.mae, "r2": metrics.r2}
-        return {
-            "mse_in_sample": metrics_in_sample.mse,
-            "mae_in_sample": metrics_in_sample.mae,
-            "r2_in_sample": metrics_in_sample.r2,
-            "mse_out_of_sample": metrics_out_of_sample.mse,
-            "mae_out_of_sample": metrics_out_of_sample.mae,
-            "r2_out_of_sample": metrics_out_of_sample.r2,
-        }
+        return result_dict
 
     def _unpack_batch(self, batch):
         """Unpack and preprocess batch data."""
@@ -357,7 +355,9 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
 
         if torch.isinf(loss).any():
             self.log(f"{prefix}/inf_loss_detected", 1.0)
-            logging.warning(f"Batch {batch_idx}, {prefix} step detected inf loss")
+            logging.warning(
+                f"Epoch {self.current_epoch}, batch {batch_idx}, {prefix} step detected inf loss"
+            )
             if prefix == "train":
                 self.train_skipped_steps += 1
                 self.current_epoch_train_skipped += 1
@@ -374,15 +374,23 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
     ) -> EvalResult:
         """Calculate standard regression metrics for model evaluation."""
 
-        # Calculate metrics
-        mse = mean_squared_error(y_test, median_predictions)
-        mae = mean_absolute_error(y_test, median_predictions)
-        r2 = r2_score(y_test, median_predictions)
+        pred_median = median_predictions["median"]
+        pred_mean = median_predictions["mean"]
 
-        return EvalResult(mse=mse, mae=mae, r2=r2)
+        return EvalResult(
+            mse=mse(y_test, pred_mean),
+            r2=r2_score(y_test, pred_mean),
+            mae=mean_absolute_error(y_test, pred_median),
+            smape=smape(y_test, pred_median),
+            nmae=nmae(y_test, pred_median),
+        )
 
     def on_train_epoch_end(self):
         """Log training statistics at the end of each epoch."""
+        # Access the epoch loss through the trainer's logged metrics
+        train_loss = self.trainer.callback_metrics.get("train/loss_epoch")
+        logging.info(f"Current epoch: {self.current_epoch}, train loss: {train_loss}")
+
         self.log(
             "train/total_ignored_target_points",
             self.num_total_ignored_train_target_points,
@@ -495,11 +503,10 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
         # Hash X_trains_preprocessed (list of tensors)
         x_train_hash = []
         for i, x_train in enumerate(X_trains_preprocessed):
-            x_train_bytes = x_train.detach().cpu().numpy().tobytes()
-            x_train_hash.append(x_train_bytes)
-            logging.info(
-                f"Hash for x_train[{i}]: {hashlib.md5(x_train_bytes).hexdigest()}"
-            )
+            x_train_hash.append(x_train.detach().cpu().numpy().tobytes())
+            # logging.info(
+            #     f"Hash for x_train[{i}]: {hashlib.md5(x_train_bytes).hexdigest()}"
+            # )
 
         # Hash y_trains_preprocessed (list of tensors)
         y_train_hash = []
@@ -510,9 +517,9 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
         x_test_hash = []
         for i, x_test in enumerate(X_tests_preprocessed):
             x_test_hash.append(x_test.detach().cpu().numpy().tobytes())
-            logging.info(
-                f"Hash for x_test[{i}]: {hashlib.md5(x_test.detach().cpu().numpy().tobytes()).hexdigest()}"
-            )
+            # logging.info(
+            #     f"Hash for x_test[{i}]: {hashlib.md5(x_test.detach().cpu().numpy().tobytes()).hexdigest()}"
+            # )
 
         # Hash y_test_standardized
         y_test_hash = []

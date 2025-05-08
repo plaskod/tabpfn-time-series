@@ -6,7 +6,7 @@ base_model:
     REGRESSION_Y_PREPROCESS_TRANSFORMS:
       - null
       - safepower
-  
+    FINGERPRINT_FEATURE: false
 loss_config:
-  ignore_negative_loss: true
-  ignore_inf_loss: true
+  ignore_negative_loss: false
+  ignore_inf_loss: false

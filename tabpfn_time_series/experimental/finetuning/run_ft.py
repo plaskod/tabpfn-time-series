@@ -36,7 +36,7 @@ from tabpfn_time_series.experimental.finetuning.configs.config import ConfigMana
 from tabpfn_time_series.experimental.finetuning.lightning_model import (
     TabPFNTimeSeriesModule,
 )
-from tabpfn_time_series.experimental.finetuning.run_ft_args import common_parse_args
+from tabpfn_time_series.experimental.finetuning.experiment_args import common_parse_args
 
 
 # Configure logging
@@ -89,7 +89,7 @@ def setup_datasets(
 
     # Override with debug values if in debug mode
     if debug_mode:
-        train_max_length = 2
+        train_max_length = 10
         test_max_length = 1
 
     logger.debug(
@@ -188,17 +188,19 @@ def setup_data_loaders(
 
 def setup_trainer(config: DictConfig, wandb_logger):
     """Configure and initialize the PyTorch Lightning trainer."""
+    metric_to_monitor = "val/out_of_sample/mae"
+
     # Setup callbacks
     checkpoint_callback = ModelCheckpoint(
         dirpath=f"checkpoints/{config.experiment_name}/{config.run_name}",
-        filename="tabpfn-ts-{epoch:02d}-{val_loss:.4f}",
-        monitor="val/loss",
+        filename="tabpfn-ts-{epoch:02d}-{val_mae:.4f}",
+        monitor=metric_to_monitor,
         mode="min",
         save_top_k=3,
     )
 
     early_stop_callback = EarlyStopping(
-        monitor="val/loss",
+        monitor=metric_to_monitor,
         patience=config.optimization.early_stopping_patience,
         mode="min",
         verbose=True,

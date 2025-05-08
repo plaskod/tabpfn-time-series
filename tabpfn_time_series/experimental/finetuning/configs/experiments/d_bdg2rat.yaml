@@ -3,6 +3,8 @@ tags:
   - mini
 seed: 0
 
+split_train_to_val: true
+
 train_datasets:
   dataset_repo_name: liamsbhoo/GiftEvalPretrain
   dataset_names:
@@ -10,11 +12,5 @@ train_datasets:
   max_context_length: 1024
   prediction_length: 100
 
-test_datasets:
-  dataset_repo_name: liamsbhoo/GiftEvalPretrain
-  dataset_names:
-    - bdg-2_fox
-  max_context_length: 1024
-  prediction_length: 100
 
 tabpfn_split_max_data_size: 10000 

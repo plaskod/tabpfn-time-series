@@ -8,7 +8,7 @@ import submitit
 from datetime import datetime
 from pathlib import Path
 
-from tabpfn_time_series.experimental.finetuning.run_ft_args import common_parse_args
+from tabpfn_time_series.experimental.finetuning.experiment_args import common_parse_args
 
 SCRIPT_PATH = Path(__file__).parent / "run_ft.py"
 
