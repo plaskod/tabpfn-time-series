@@ -217,40 +217,43 @@ class TabPFNTimeSeriesModule(pl.LightningModule):
         y_test_raw_numpy = y_test_raw.cpu().numpy()
 
         self.eval_model.fit(x_train_raw_numpy, y_train_raw_numpy)
-        full_pred_on_train = self.eval_model.predict(
-            x_train_raw_numpy, output_type="full"
-        )
         full_pred_on_test = self.eval_model.predict(
             x_test_raw_numpy, output_type="full"
         )
 
-        # Calculate regression metrics
-        metrics_in_sample = self._calculate_regression_metrics(
-            median_predictions=full_pred_on_train,
-            y_test=y_train_raw_numpy,
-        )
-        metrics_out_of_sample = self._calculate_regression_metrics(
+        metrics_on_test = self._calculate_regression_metrics(
             median_predictions=full_pred_on_test,
             y_test=y_test_raw_numpy,
         )
 
         # Log metrics and prepare return dictionary
         result_dict = {}
-        for prefix, metrics in zip(
-            ["in_sample", "out_of_sample"], [metrics_in_sample, metrics_out_of_sample]
-        ):
+        for field_name in EvalResult.__dataclass_fields__:
+            field_value = getattr(metrics_on_test, field_name)
+            self.log(
+                f"val/{field_name}",
+                field_value,
+                on_step=True,
+                on_epoch=True,
+            )
+            result_dict[field_name] = field_value
+
+        if self.training_config["also_validate_on_train"]:
+            full_pred_on_train = self.eval_model.predict(
+                x_train_raw_numpy, output_type="full"
+            )
+            metrics_on_train = self._calculate_regression_metrics(
+                median_predictions=full_pred_on_train,
+                y_test=y_train_raw_numpy,
+            )
             for field_name in EvalResult.__dataclass_fields__:
-                field_value = getattr(metrics, field_name)
+                field_value = getattr(metrics_on_train, field_name)
                 self.log(
-                    f"val/{prefix}/{field_name}",
+                    f"val/on_train_{field_name}",
                     field_value,
                     on_step=True,
                     on_epoch=True,
-                    batch_size=1,
                 )
-                result_dict[f"{field_name}_{prefix}"] = field_value
-
-        # self.log("val/loss", loss, on_epoch=True, batch_size=1)
 
         return result_dict
 

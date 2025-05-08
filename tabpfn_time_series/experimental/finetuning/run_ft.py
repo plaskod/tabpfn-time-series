@@ -89,8 +89,8 @@ def setup_datasets(
 
     # Override with debug values if in debug mode
     if debug_mode:
-        train_max_length = 10
-        test_max_length = 1
+        train_max_length = 5
+        test_max_length = 2
 
     logger.debug(
         f"Using train_max_length={train_max_length}, test_max_length={test_max_length}"
@@ -188,7 +188,7 @@ def setup_data_loaders(
 
 def setup_trainer(config: DictConfig, wandb_logger):
     """Configure and initialize the PyTorch Lightning trainer."""
-    metric_to_monitor = "val/out_of_sample/mae"
+    metric_to_monitor = "val/mae"
 
     # Setup callbacks
     checkpoint_callback = ModelCheckpoint(
@@ -214,7 +214,7 @@ def setup_trainer(config: DictConfig, wandb_logger):
         accelerator="auto",
         gradient_clip_val=1.0,
         accumulate_grad_batches=config.optimization.gradient_accumulation_steps,
-        log_every_n_steps=8,
+        log_every_n_steps=8,  # essentially every x batches
     )
 
     return trainer, checkpoint_callback
@@ -326,6 +326,7 @@ def main():
         "finetune_space": config.optimization.finetune_space,
         "ignore_negative_loss": config.loss_config.ignore_negative_loss,
         "ignore_inf_loss": config.loss_config.ignore_inf_loss,
+        "also_validate_on_train": config.also_validate_on_train,
     }
 
     # Initialize PyTorch Lightning module

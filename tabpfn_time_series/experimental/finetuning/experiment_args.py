@@ -94,6 +94,12 @@ def common_parse_args(return_parser: bool = False) -> Namespace | ArgumentParser
         help="Use training datasets for validation instead of test datasets",
     )
 
+    parser.add_argument(
+        "--also_validate_on_train",
+        action="store_true",
+        help="Also validate on training datasets",
+    )
+
     if return_parser:
         return parser
     else:
