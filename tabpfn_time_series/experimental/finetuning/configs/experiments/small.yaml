@@ -1,18 +1,45 @@
-experiment_name: mini
+experiment_name: small
 tags:
-  - mini
+  - small
 seed: 0
-
-base_model:
-  n_estimators: 8
-  inference_precision: float32
-  ignore_pretraining_limits: true
 
 train_datasets:
   dataset_repo_name: liamsbhoo/GiftEvalPretrain
   dataset_names:
-    - 
-  max_context_length: 1000
+    - london_smart_meters_with_missing
+    - wind_farms_with_missing
+    - wind_power
+    - solar_power
+    - oikolab_weather
+    - elecdemand
+    - covid_mobility
+    - kaggle_web_traffic_weekly
+    - extended_web_traffic_with_missing
+    - m1_yearly
+    - m1_quarterly
+    - m1_monthly
+    - monash_m3_yearly
+    - monash_m3_quarterly
+    - monash_m3_monthly
+    - monash_m3_other
+    - nn5_daily_with_missing
+    - nn5_weekly
+    - tourism_yearly
+    - tourism_quarterly
+    - tourism_monthly
+    # - cif_2016
+    - traffic_weekly
+    - traffic_hourly
+    - australian_electricity_demand
+    - rideshare_with_missing
+    - sunspot_with_missing
+    - vehicle_trips_with_missing
+    - weather
+    - fred_md
+    - pedestrian_counts
+    - bitcoin_with_missing
+
+  max_context_length: 1024
   prediction_length: 100
 
 test_datasets:
@@ -27,7 +54,7 @@ test_datasets:
     - ideal
     - sceaux
     - borealis
-  max_context_length: 1000
+  max_context_length: 1024
   prediction_length: 100
 
 tabpfn_split_max_data_size: 10000 

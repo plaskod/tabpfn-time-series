@@ -24,8 +24,7 @@ from tabpfn.preprocessing import DatasetCollectionWithPreprocessing
 from tabpfn.utils import collate_for_tabpfn_dataset
 
 from tabpfn_time_series.experimental.finetuning.dataset import (
-    TabPFNTimeSeriesPretrainDataset,
-    load_all_ts_datasets,
+    TimeSeriesDataManager,
     filter_constant_series,
     XTrainType,
     YTrainType,
@@ -73,15 +72,9 @@ def setup_datasets(
     config: DictConfig,
     debug_mode: bool = False,
     hf_cache_dir: str = None,
+    dataset_cache_dir: str = None,
 ) -> Tuple[List[XTrainType], List[YTrainType], List[XTestType], List[YTestType]]:
-    """Setup datasets for training and validation."""
-
-    train_dataset = TabPFNTimeSeriesPretrainDataset(
-        dataset_repo_name=config.train_datasets.dataset_repo_name,
-        dataset_names=config.train_datasets.dataset_names,
-        max_context_length=config.train_datasets.max_context_length,
-        hf_cache_dir=hf_cache_dir,
-    )
+    """Setup datasets for training and validation"""
 
     # Get dataset length limits from config or use defaults
     train_max_length = config.get("train_max_length", None)
@@ -89,26 +82,39 @@ def setup_datasets(
 
     # Override with debug values if in debug mode
     if debug_mode:
-        train_max_length = 5
+        train_max_length = 10
         test_max_length = 2
 
     logger.debug(
         f"Using train_max_length={train_max_length}, test_max_length={test_max_length}"
     )
 
+    # Initialize TimeSeriesDataManager
+    data_manager = TimeSeriesDataManager(
+        cache_dir=dataset_cache_dir,
+        max_context_length=config.train_datasets.max_context_length,
+        hf_cache_dir=hf_cache_dir,
+    )
+
+    # Define preprocessing function
+    preprocess_fn = filter_constant_series
+
     if config.split_train_to_val or config.use_train_as_val:
         logger.info("Loading train datasets only")
         logger.info(
-            f"Train dataset: repo={train_dataset.dataset_repo_name}, names={train_dataset.dataset_names}"
+            f"Train dataset: repo={config.train_datasets.dataset_repo_name}, names={config.train_datasets.dataset_names}"
         )
 
-        all_X, all_y = load_all_ts_datasets(
-            train_dataset,
-            shuffle=True,
-            max_length=train_max_length,
-            preprocess_fn=filter_constant_series,
-            prefix="train",
+        # Load training data
+        all_X, all_y = data_manager.load_featurized_datasets(
+            dataset_repo_name=config.train_datasets.dataset_repo_name,
+            dataset_names=config.train_datasets.dataset_names,
+            max_samples_per_dataset=train_max_length,
+            preprocess_fn=preprocess_fn,
         )
+
+        # Print len(all_X)
+        logger.info(f"Loaded {len(all_X)} training samples")
 
         # Split into train and test sets
         if config.split_train_to_val:
@@ -122,34 +128,27 @@ def setup_datasets(
     else:
         logger.info("Loading train and test datasets")
 
-        test_dataset = TabPFNTimeSeriesPretrainDataset(
+        logger.info(
+            f"Train dataset: repo={config.train_datasets.dataset_repo_name}, names={config.train_datasets.dataset_names}"
+        )
+        logger.info(
+            f"Test dataset: repo={config.test_datasets.dataset_repo_name}, names={config.test_datasets.dataset_names}"
+        )
+
+        # Load training data
+        all_train_X, all_train_y = data_manager.load_featurized_datasets(
+            dataset_repo_name=config.train_datasets.dataset_repo_name,
+            dataset_names=config.train_datasets.dataset_names,
+            max_samples_per_dataset=train_max_length,
+            preprocess_fn=preprocess_fn,
+        )
+
+        # Load test data
+        all_test_X, all_test_y = data_manager.load_featurized_datasets(
             dataset_repo_name=config.test_datasets.dataset_repo_name,
             dataset_names=config.test_datasets.dataset_names,
-            max_context_length=config.test_datasets.max_context_length,
-            hf_cache_dir=hf_cache_dir,
-        )
-
-        logger.info(
-            f"Train dataset: repo={train_dataset.dataset_repo_name}, names={train_dataset.dataset_names}"
-        )
-        logger.info(
-            f"Test dataset: repo={test_dataset.dataset_repo_name}, names={test_dataset.dataset_names}"
-        )
-
-        all_train_X, all_train_y = load_all_ts_datasets(
-            train_dataset,
-            shuffle=True,
-            max_length=train_max_length,
-            preprocess_fn=filter_constant_series,
-            prefix="train",
-        )
-
-        all_test_X, all_test_y = load_all_ts_datasets(
-            test_dataset,
-            shuffle=True,
-            max_length=test_max_length,
-            preprocess_fn=filter_constant_series,
-            prefix="test",
+            max_samples_per_dataset=test_max_length,
+            preprocess_fn=preprocess_fn,
         )
 
     return all_train_X, all_train_y, all_test_X, all_test_y
@@ -163,14 +162,14 @@ def setup_data_loaders(
 ) -> Tuple[DataLoader, DataLoader]:
     """Create and configure data loaders for training and validation."""
 
-    # Debug
+    # Hard-fix for TabPFN only supporting dataloader with num_workers=0
     num_workers = 0
 
     train_dl = DataLoader(
         train_datasets_collection,
         batch_size=1,
         collate_fn=collate_for_tabpfn_dataset,
-        shuffle=False,  # Already shuffled in the dataset
+        shuffle=True,
         num_workers=num_workers,
         persistent_workers=num_workers > 0,
     )
@@ -274,6 +273,13 @@ def main():
             "HF_CACHE_DIR environment variable not set. Using default cache directory."
         )
 
+    # Get dataset cache directory from environment
+    dataset_cache_dir = os.getenv("TABPFN_TS_CACHE_DIR")
+    if dataset_cache_dir is None:
+        logger.warning(
+            "DATASET_CACHE_DIR environment variable not set. Using default cache directory."
+        )
+
     # Set random seed for reproducibility
     seed = config.seed
     set_seed(seed)
@@ -306,7 +312,7 @@ def main():
 
     # Setup datasets
     all_train_X, all_train_y, all_test_X, all_test_y = setup_datasets(
-        config, debug_mode, hf_cache_dir
+        config, debug_mode, hf_cache_dir, dataset_cache_dir
     )
 
     logger.info(

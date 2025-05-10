@@ -1,12 +1,15 @@
 import os
 import time
-from typing import Tuple, TypeAlias, Optional, Callable
-from dataclasses import dataclass, field
+import json
+import pickle
+import hashlib
+import random
+import logging
+from typing import Tuple, TypeAlias, Optional, Callable, List, Dict, Any, Union
 from datetime import datetime
+import multiprocessing
 import pandas as pd
 import numpy as np
-import logging
-
 from tqdm import tqdm
 from datasets import load_dataset
 from torch.utils.data import Dataset, DataLoader
@@ -20,14 +23,15 @@ from tabpfn_time_series.experimental.pipeline.time_series_preprocessing import (
 
 logger = logging.getLogger(__name__)
 
-
 XType: TypeAlias = pd.DataFrame
 YType: TypeAlias = pd.Series
 XTrainType: TypeAlias = XType
 YTrainType: TypeAlias = YType
 XTestType: TypeAlias = XType
 YTestType: TypeAlias = YType
-
+CACHE_KEY_TYPE: TypeAlias = str
+CACHE_PATH_TYPE: TypeAlias = str
+METADATA_TYPE: TypeAlias = Dict[CACHE_KEY_TYPE, CACHE_PATH_TYPE]
 
 DEFAULT_FEATURE_CONFIG = {
     "RunningIndexFeature": {},
@@ -43,11 +47,308 @@ DEFAULT_FEATURE_CONFIG = {
 }
 
 
-@dataclass
-class TimeSeriesPretrainConfig:
-    feature_config: dict = field(default_factory=lambda: DEFAULT_FEATURE_CONFIG)
-    max_context_length: int = 4096
-    prediction_length: int = 7
+def try_read_pickle(
+    path: str,
+    fallback: Optional[Any] = None,
+) -> Any:
+    """
+    Try to read a pickle file.
+    """
+    try:
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    except Exception as e:
+        logger.warning(f"Failed to load pickle file {path}: {e}. Returning {fallback}.")
+        return fallback
+
+
+def try_write_pickle(path: str, data: Any, protocol: Optional[int] = None):
+    """
+    Try to write a pickle file.
+    """
+    try:
+        with open(path, "wb") as f:
+            pickle.dump(data, f, protocol=protocol)
+    except Exception as e:
+        logger.warning(f"Failed to write pickle file {path}: {e}")
+        raise e
+
+
+class TimeSeriesDataManager:
+    """
+    Manager for time series datasets with caching and feature extraction.
+    """
+
+    def __init__(
+        self,
+        cache_dir: Optional[str] = None,
+        hf_cache_dir: Optional[str] = None,
+        max_context_length: int = 4096,
+        feature_config: Dict = DEFAULT_FEATURE_CONFIG,
+    ):
+        """
+        Initialize the TimeSeriesDataManager.
+
+        Args:
+            cache_dir: Directory to store cached datasets
+            hf_cache_dir: Directory for Hugging Face dataset cache
+            max_context_length: Maximum context length for time series preprocessing
+            feature_config: Configuration for feature extraction
+        """
+
+        self.cache_dir = cache_dir
+        self.hf_cache_dir = hf_cache_dir
+        self.max_context_length = max_context_length
+        self.feature_config = feature_config
+
+        # Caching
+        if cache_dir:
+            os.makedirs(cache_dir, exist_ok=True)
+            # Create subdirectories for different cache levels
+            for subdir in ["featurized", "metadata"]:
+                os.makedirs(os.path.join(cache_dir, subdir), exist_ok=True)
+
+        self._metadata: METADATA_TYPE = self._load_metadata()
+
+        # Generate a hash for the feature configuration
+        self.feature_hash = self._hash_config(feature_config)
+        logger.debug(f"Feature configuration hash: {self.feature_hash}")
+
+    def _get_metadata_path(self) -> str:
+        """Get the path to the cache metadata file."""
+        if not self.cache_dir:
+            return None
+        return os.path.join(self.cache_dir, "metadata", "cache_metadata.pkl")
+
+    @staticmethod
+    def _get_cache_key(
+        dataset_repo_name: str,
+        dataset_name: str,
+        feature_hash: str,
+        preprocess_fn: Optional[
+            Callable[[XType, YType], Optional[Tuple[XType, YType]]]
+        ] = None,
+        max_samples_per_dataset: Optional[int] = None,
+    ) -> CACHE_KEY_TYPE:
+        """Get the cache key for a dataset."""
+        name = (
+            f"{dataset_repo_name.replace('/', '_')}_{dataset_name}_feat{feature_hash}"
+        )
+        if preprocess_fn is not None:
+            name += f"_preprocess{preprocess_fn.__name__}"
+        if max_samples_per_dataset is not None:
+            name += f"_max{max_samples_per_dataset}"
+        return name
+
+    def _get_dataset_cache_path(self, cache_key: CACHE_KEY_TYPE) -> str:
+        """Get the path to the dataset cache file."""
+        return os.path.join(self.cache_dir, "featurized", f"{cache_key}.pkl")
+
+    def _load_metadata(self) -> METADATA_TYPE:
+        """Load the cache metadata from disk if it exists."""
+        metadata_path = self._get_metadata_path()
+        if metadata_path and os.path.exists(metadata_path):
+            res = try_read_pickle(metadata_path, {})
+            logger.info(f"Loaded cache metadata with {len(res)} entries")
+            logger.debug(f"Cache metadata: {res}")
+        else:
+            logger.info("No cache metadata found. Creating new metadata.")
+            res = {}
+
+        return res
+
+    def _save_metadata(self, metadata: METADATA_TYPE):
+        """Save the cache metadata to disk."""
+        metadata_path = self._get_metadata_path()
+        try_write_pickle(metadata_path, metadata, protocol=4)
+        logger.info(f"Saved cache metadata with {len(metadata)} entries")
+
+    def _update_metadata(self, cache_key: CACHE_KEY_TYPE, cache_path: CACHE_PATH_TYPE):
+        """Update the cache metadata."""
+        self._metadata[cache_key] = cache_path
+        self._save_metadata(self._metadata)
+
+    def _remove_from_metadata(self, cache_key: CACHE_KEY_TYPE):
+        """Remove a cache key from the metadata."""
+        del self._metadata[cache_key]
+        self._save_metadata(self._metadata)
+
+    def _load_cache(self, cache_key: CACHE_KEY_TYPE) -> Tuple[List[XType], List[YType]]:
+        """Load a featurized dataset from cache."""
+        cache_path = self._metadata[cache_key]
+        data = try_read_pickle(cache_path, fallback=None)
+        if data is None:
+            logger.warning(f"No data found for cache key {cache_key}")
+            return None, None
+
+        X, y = data
+        return X, y
+
+    def _save_cache(
+        self,
+        cache_path: CACHE_PATH_TYPE,
+        X: List[XType],
+        y: List[YType],
+    ):
+        """Save a featurized dataset to cache."""
+        try_write_pickle(cache_path, (X, y), protocol=4)
+        logger.info(f"Saved featurized dataset to cache at {cache_path}")
+
+    def load_featurized_datasets(
+        self,
+        dataset_repo_name: str,
+        dataset_names: Optional[List[str]],
+        max_samples_per_dataset: Optional[int] = None,
+        preprocess_fn: Optional[
+            Callable[[XType, YType], Optional[Tuple[XType, YType]]]
+        ] = None,
+        force_recompute: bool = False,
+    ) -> Tuple[List[XType], List[YType]]:
+        """
+        Load a featurized dataset from cache/scratch.
+        This will load all the datasets into memory, so use with caution.
+        """
+
+        all_X, all_y = [], []
+        for dataset_name in dataset_names:
+            cache_key = self._get_cache_key(
+                dataset_repo_name,
+                dataset_name,
+                self.feature_hash,
+                preprocess_fn,
+                max_samples_per_dataset,
+            )
+            if cache_key in self._metadata and not force_recompute:
+                logger.info(f"Loading featurized dataset for {dataset_name} from CACHE")
+                X, y = self._load_cache(cache_key)
+                if X is None:
+                    logger.warning(f"No data found for cache key {cache_key}")
+                    self._remove_from_metadata(cache_key)
+                    raise ValueError(f"No data found for cache key {cache_key}")
+
+                if max_samples_per_dataset is not None:
+                    # Just a sanity check
+                    assert len(X) == max_samples_per_dataset
+                    assert len(y) == max_samples_per_dataset
+
+            else:
+                logger.info(
+                    f"Loading featurized dataset from SCRATCH for {dataset_name}"
+                )
+
+                # Load from scratch, preprocess and featurize data.
+                X, y = self._load_dataset(
+                    dataset_repo_name=dataset_repo_name,
+                    dataset_name=dataset_name,
+                    hf_cache_dir=self.hf_cache_dir,
+                    max_samples_per_dataset=max_samples_per_dataset,
+                )
+
+                # Save to cache, update metadata
+                cache_path = self._get_dataset_cache_path(cache_key)
+                self._save_cache(cache_path, X, y)
+                self._update_metadata(cache_key, cache_path)
+
+                print(f"Before preprocess_fn: {len(X)}")
+
+                if preprocess_fn is not None:
+                    preprocessed_X, preprocessed_y = [], []
+                    for X_i, y_i in zip(X, y):
+                        X_i, y_i = preprocess_fn(X_i, y_i)
+                        preprocessed_X.append(X_i)
+                        preprocessed_y.append(y_i)
+                    X, y = preprocessed_X, preprocessed_y
+
+                print(f"After preprocess_fn: {len(X)}")
+
+            all_X.extend(X)
+            all_y.extend(y)
+
+        return all_X, all_y
+
+    def _load_dataset(
+        self,
+        dataset_repo_name: str,
+        dataset_name: str,
+        hf_cache_dir: Optional[str] = None,
+        max_samples_per_dataset: Optional[int] = None,
+    ) -> Tuple[List[XType], List[YType]]:
+        """
+        Load a single raw dataset from Hugging Face.
+
+        Args:
+            dataset_repo_name: Repository name on Hugging Face
+            dataset_name: Dataset name to load or None for default dataset
+            hf_cache_dir: Directory for Hugging Face to store downloaded datasets
+            max_samples_per_dataset: Maximum number of samples to load from the dataset
+
+        Returns:
+            The loaded dataset as (X, y) tuple
+        """
+        # Load from Hugging Face using TabPFNTimeSeriesPretrainDataset
+        logger.info(f"Loading raw dataset from {dataset_repo_name}/{dataset_name}")
+        start_time = time.time()
+
+        try:
+            # Create dataset and dataloader
+            dataset = TabPFNTimeSeriesPretrainDataset(
+                dataset_repo_name=dataset_repo_name,
+                dataset_names=[dataset_name],
+                max_context_length=self.max_context_length,
+                feature_config=self.feature_config,
+                hf_cache_dir=hf_cache_dir,
+            )
+
+            # Automatically determine number of workers based on available CPU cores
+            num_workers = max(0, multiprocessing.cpu_count() - 1)
+
+            # Use DataLoader to efficiently load all data
+            dataloader = DataLoader(
+                dataset,
+                batch_size=64,  # Adjust batch size as needed
+                collate_fn=efficient_collate_fn,
+                num_workers=num_workers,
+            )
+
+            logger.info(f"Using {num_workers} worker processes for data loading")
+
+            # Collect all data
+            all_X, all_y = [], []
+            for batch_X, batch_y in tqdm(dataloader, desc=f"Loading {dataset_name}"):
+                all_X.extend(batch_X)
+                all_y.extend(batch_y)
+
+                # Check if we've reached the maximum number of samples
+                if (
+                    max_samples_per_dataset is not None
+                    and len(all_X) >= max_samples_per_dataset
+                ):
+                    all_X = all_X[:max_samples_per_dataset]
+                    all_y = all_y[:max_samples_per_dataset]
+                    break
+
+            logger.info(f"Loaded dataset '{dataset_name}' with {len(all_X)} samples")
+
+        except Exception as e:
+            logger.error(
+                f"Failed to load dataset from {dataset_repo_name}/{dataset_name}: {e}"
+            )
+            raise ValueError(
+                f"Failed to load dataset from {dataset_repo_name}/{dataset_name}: {e}"
+            )
+
+        end_time = time.time()
+        logger.info(
+            f"Time taken to load raw data: {int(end_time - start_time)} seconds"
+        )
+
+        return all_X, all_y
+
+    @staticmethod
+    def _hash_config(config: Dict) -> str:
+        """Create a hash of a configuration dictionary."""
+        config_str = json.dumps(config, sort_keys=True)
+        return hashlib.md5(config_str.encode()).hexdigest()[:8]
 
 
 class TabPFNTimeSeriesPretrainDataset(Dataset):
@@ -55,7 +356,6 @@ class TabPFNTimeSeriesPretrainDataset(Dataset):
         self,
         dataset_repo_name: str = "liamsbhoo/GiftEvalPretrainMini",
         dataset_names: list[str] = None,
-        time_series_pretrain_config: TimeSeriesPretrainConfig = TimeSeriesPretrainConfig(),
         max_context_length: int = 4096,
         feature_config: dict = DEFAULT_FEATURE_CONFIG,
         hf_cache_dir: str = None,
@@ -216,8 +516,8 @@ class TabPFNTimeSeriesPretrainDataset(Dataset):
 
 
 def efficient_collate_fn(
-    batch: list[Tuple[XType, YType]],
-) -> Tuple[list[XType], list[YType]]:
+    batch: List[Tuple[XType, YType]],
+) -> Tuple[List[XType], List[YType]]:
     """
     Efficiently collate batches of (X, y) pairs.
 
@@ -237,106 +537,116 @@ def efficient_collate_fn(
     return X_list, y_list
 
 
-def load_all_ts_datasets(
-    dataset: TabPFNTimeSeriesPretrainDataset,
-    shuffle: bool = False,
-    max_length: int = None,
-    preprocess_fn: Callable[[XType, YType], Tuple[XType, YType]] = None,
-    prefix: str = None,
-) -> Tuple[list[XType], list[YType]]:
+def filter_constant_series(
+    X: XType,
+    y: YType,
+    threshold: float = 1e-8,
+) -> Optional[Tuple[XType, YType]]:
     """
-    Load all time series datasets efficiently with minimal memory copying
+    Filter out time series with nearly constant y values.
+    """
+    # Skip if standard deviation is too small (nearly constant)
+    if y.std() < threshold:
+        logger.debug(f"Skipping constant series with std: {y.std()}")
+        return None
+
+    # Series passed all filters
+    return X, y
+
+
+def load_all_ts_datasets(
+    dataset: Union[TabPFNTimeSeriesPretrainDataset, Dict],
+    shuffle: bool = False,
+    max_length: Optional[int] = None,
+    preprocess_fn: Optional[
+        Callable[[XType, YType], Optional[Tuple[XType, YType]]]
+    ] = None,
+    prefix: Optional[str] = None,
+    cache_dir: Optional[str] = None,
+    force_recompute: bool = False,
+) -> Tuple[List[XType], List[YType]]:
+    """
+    Load all time series datasets efficiently.
+
+    This function is maintained for backward compatibility.
+    For new code, use TimeSeriesDataManager directly.
 
     Args:
-        dataset: The dataset to load
+        dataset: Dataset object or configuration dictionary
         shuffle: Whether to shuffle the dataset
-        max_length: Maximum number of samples to load (None for all)
-        preprocess_fn: Optional callable to preprocess/filter individual samples
-                      Should take (X, y) and return (X, y) for each sample
+        max_length: Maximum number of samples to load
+        preprocess_fn: Optional function to filter/transform samples
+        prefix: Optional prefix for debug file names
+        cache_dir: Directory to store cached datasets
+        force_recompute: If True, recompute even if cached
 
     Returns:
-        Tuple of (all_X, all_y) where all_X is a list of DataFrames and
-        all_y is a list of Series
+        Tuple of (all_X, all_y) containing processed features and targets
     """
-    # Automatically set num_workers to the number of available CPU cores
-    num_workers = max(os.cpu_count() - 1, 1)
-    batch_size = 128
-    prefetch_factor = 4
+    # If dataset is already a TabPFNTimeSeriesPretrainDataset, use its data
+    if isinstance(dataset, TabPFNTimeSeriesPretrainDataset):
+        all_X, all_y = dataset.all_X, dataset.all_y
 
-    # Adjust batch size and prefetch_factor if max_length is specified
-    if max_length is not None:
-        batch_size = min(128, max_length)
-        prefetch_factor = 4 if max_length > 1000 else None
+        # Apply additional preprocessing if needed
+        if preprocess_fn and preprocess_fn != dataset.preprocess_fn:
+            logger.info(f"Applying additional preprocessing: {preprocess_fn.__name__}")
+            filtered_data = []
+            for X, y in zip(all_X, all_y):
+                result = preprocess_fn(X, y)
+                if result is not None:
+                    filtered_data.append(result)
 
-    # Pre-allocate lists with known capacity to avoid resizing
-    all_X, all_y = [], []
-
-    dataloader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        collate_fn=efficient_collate_fn,
-        pin_memory=True,
-        num_workers=num_workers,
-        prefetch_factor=prefetch_factor,
-    )
-
-    # Process each batch
-    n_samples_loaded = 0
-    n_samples_skipped = 0
-    for batch_X, batch_y in tqdm(dataloader, desc="Loading time series datasets"):
-        # Apply preprocessing to each sample in the batch if provided
-        if preprocess_fn is not None:
-            logger.debug(f"Applying preprocess_fn to {len(batch_X)} samples")
-            # Process in a single list comprehension to avoid intermediate lists
-            valid_pairs = [
-                result
-                for X, y in zip(batch_X, batch_y)
-                if (result := preprocess_fn(X, y)) is not None
-            ]
-            n_samples_skipped += len(batch_X) - len(valid_pairs)
-            logger.debug(f"Left with {len(valid_pairs)} samples")
-
-            # Only unzip if we have valid samples
-            if valid_pairs:
-                batch_X, batch_y = zip(*valid_pairs)
+            if filtered_data:
+                all_X, all_y = zip(*filtered_data)
             else:
-                batch_X, batch_y = [], []
+                all_X, all_y = [], []
 
-        # Check if we've reached max_length before extending
-        if max_length is not None:
-            remaining = max_length - n_samples_loaded
-            if remaining <= 0:
-                break
+        # Apply max_length if specified
+        if max_length is not None and len(all_X) > max_length:
+            all_X = all_X[:max_length]
+            all_y = all_y[:max_length]
 
-            # Only take what we need to reach max_length
-            if len(batch_X) > remaining:
-                batch_X = batch_X[:remaining]
-                batch_y = batch_y[:remaining]
+        # Apply shuffle if requested
+        if shuffle:
+            indices = list(range(len(all_X)))
+            random.shuffle(indices)
+            all_X = [all_X[i] for i in indices]
+            all_y = [all_y[i] for i in indices]
 
-        # Add samples and update counter
-        all_X.extend(batch_X)
-        all_y.extend(batch_y)
-        n_samples_loaded += len(batch_X)
+        return all_X, all_y
 
-    logger.info(f"Loaded {len(all_X)} total samples, skipped {n_samples_skipped}")
+    # If dataset is a dictionary, create a new TabPFNTimeSeriesPretrainDataset
+    elif isinstance(dataset, dict):
+        dataset_obj = TabPFNTimeSeriesPretrainDataset(
+            dataset_repo_name=dataset.get(
+                "dataset_repo_name", "liamsbhoo/GiftEvalPretrainMini"
+            ),
+            dataset_names=dataset.get("dataset_names"),
+            max_context_length=dataset.get("max_context_length", 4096),
+            feature_config=dataset.get("feature_config", DEFAULT_FEATURE_CONFIG),
+            hf_cache_dir=dataset.get("hf_cache_dir"),
+            cache_dir=cache_dir,
+            preprocess_fn=preprocess_fn,
+            max_samples=max_length,
+            force_recompute=force_recompute,
+        )
 
-    # Optional debugging: Save dataset to CSV files if debug flag is set
-    if os.environ.get("DEBUG_SAVE_RAW_DATA"):
-        save_data_into_csvs(all_X, all_y, prefix=prefix)
+        return dataset_obj.all_X, dataset_obj.all_y
 
-    return all_X, all_y
+    else:
+        raise TypeError(f"Unsupported dataset type: {type(dataset)}")
 
 
-def save_data_into_csvs(all_X, all_y, prefix: str = None):
+def save_data_into_csvs(all_X, all_y, prefix: Optional[str] = None):
     """
     Save dataset to CSV files for debugging purposes.
 
     Args:
         all_X: List of feature DataFrames
         all_y: List of target Series
+        prefix: Optional prefix for file names
     """
-    import pandas as pd
+    prefix = prefix or "debug"
 
     try:
         all_X_df, all_y_df = [], []
@@ -360,27 +670,3 @@ def save_data_into_csvs(all_X, all_y, prefix: str = None):
 
     except Exception as e:
         logger.warning(f"Failed to save debug CSV files: {e}")
-
-
-def filter_constant_series(
-    X: XType,
-    y: YType,
-    threshold: float = 1e-8,
-) -> Optional[Tuple[XType, YType]]:
-    """
-    Filter out time series with nearly constant y values.
-
-    Args:
-        X: Feature DataFrame
-        y: Target Series
-
-    Returns:
-        Tuple of (X, y) if the series passes the filters, None otherwise
-    """
-    # Skip if standard deviation is too small (nearly constant)
-    if y.std() < threshold:
-        logger.debug(f"Skipping constant series with std: {y.std()}")
-        return None
-
-    # Series passed all filters
-    return X, y
