@@ -26,6 +26,7 @@ dependencies = [
     "datasets>=3.3.2",
     "python-dotenv>=1.1.0",
     "pyyaml>=6.0.1",
+    "schedulefree>=1.4.1",
 ]
 
 [project.optional-dependencies]
