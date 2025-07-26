@@ -7,8 +7,8 @@ import pandas as pd
 import numpy as np
 import torch
 from scipy.stats import norm
-from autogluon.timeseries import TimeSeriesDataFrame
 
+from tabpfn_time_series.ts_dataframe import TimeSeriesDataFrame
 from tabpfn_time_series.data_preparation import split_time_series_to_X_y
 from tabpfn_time_series.defaults import TABPFN_TS_DEFAULT_QUANTILE_CONFIG
 
@@ -122,17 +122,38 @@ class TabPFNClient(TabPFNWorker):
         config: dict = {},
         num_workers: int = 16,
     ):
-        super().__init__(config, num_workers)
-
         # Initialize the TabPFN client (e.g. sign up, login, etc.)
         from tabpfn_client import init
 
         init()
 
+        # Parse the model name (only needed for TabPFNClient)
+        config = config.copy()
+        config["tabpfn_internal"]["model_path"] = self._parse_model_name(
+            config["tabpfn_internal"]["model_path"]
+        )
+
+        super().__init__(config, num_workers)
+
     def _get_tabpfn_engine(self):
         from tabpfn_client import TabPFNRegressor
 
         return TabPFNRegressor(**self.config["tabpfn_internal"])
+
+    def _parse_model_name(self, model_name: str) -> str:
+        from tabpfn_client import TabPFNRegressor
+
+        available_models = TabPFNRegressor.list_available_models()
+
+        for m in available_models:
+            # Model names from tabpfn_client are abbreviated
+            # e.g. "tabpfn-v2-regressor-2noar4o2.ckpt" -> "2noar4o2"
+            if m in model_name:
+                return m
+        raise ValueError(
+            f"Model {model_name} not found. Available models: {available_models}."
+            "Note that model names from tabpfn_client are abbreviated (e.g. 'tabpfn-v2-regressor-2noar4o2.ckpt' -> '2noar4o2')"
+        )
 
 
 class LocalTabPFN(TabPFNWorker):
@@ -150,6 +171,9 @@ class LocalTabPFN(TabPFNWorker):
         super().__init__(
             config, num_workers=torch.cuda.device_count() * self.num_workers_per_gpu
         )
+
+        # Download the model specified in the config
+        self._download_model(self.config["tabpfn_internal"]["model_path"])
 
     def predict(
         self,
@@ -186,21 +210,29 @@ class LocalTabPFN(TabPFNWorker):
 
         return TimeSeriesDataFrame(predictions)
 
+    @staticmethod
+    def _download_model(model_name: str):
+        from tabpfn.model.loading import resolve_model_path, download_model
+
+        # Resolve the model path
+        # If the model path is not specified, this resolves to the default model path
+        model_path, _, model_name, which = resolve_model_path(
+            model_name,
+            which="regressor",
+        )
+
+        if not model_path.exists():
+            download_model(
+                to=model_path,
+                which=which,
+                version="v2",
+                model_name=model_name,
+            )
+
     def _get_tabpfn_engine(self):
         from tabpfn import TabPFNRegressor
 
-        # Create a copy of the config to avoid modifying the original
-        config = self.config["tabpfn_internal"].copy()
-
-        # Handle model path if specified
-        if "model_path" in config:
-            config["model_path"] = self._parse_model_path(config["model_path"])
-
-        # Initialize the TabPFNRegressor with fixed random state for reproducibility
-        return TabPFNRegressor(**config, random_state=0)
-
-    def _parse_model_path(self, model_name: str) -> str:
-        return f"tabpfn-v2-regressor-{model_name}.ckpt"
+        return TabPFNRegressor(**self.config["tabpfn_internal"], random_state=0)
 
     def _prediction_routine_per_gpu(
         self,
