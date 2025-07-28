@@ -1,9 +1,21 @@
 import logging
 from enum import Enum
 
+from typing import Callable, Type
+
 from tabpfn_time_series.ts_dataframe import TimeSeriesDataFrame
-from tabpfn_time_series.tabpfn_worker import TabPFNClient, LocalTabPFN, MockTabPFN
 from tabpfn_time_series.defaults import TABPFN_TS_DEFAULT_CONFIG
+from tabpfn_time_series.worker.parallel import (
+    ParallelWorker,
+    CPUParallelWorker,
+    GPUParallelWorker,
+)
+from tabpfn_time_series.worker.base_inference_engine import (
+    TabPFNClientInferenceEngine,
+    LocalTabPFNInferenceEngine,
+    MockTabPFNInferenceEngine,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +26,35 @@ class TabPFNMode(Enum):
     MOCK = "tabpfn-mock"
 
 
-class TabPFNTimeSeriesPredictor:
+class TimeSeriesPredictor:
+    """
+    Given a TimeSeriesDataFrame (multiple time series), perform prediction on each time series individually.
+    """
+
+    def __init__(
+        self,
+        inference_routine: Callable,
+        worker_class: Type[ParallelWorker],
+        worker_kwargs: dict = {},
+    ):
+        self.inference_routine = inference_routine
+        self.worker = worker_class(inference_routine, **worker_kwargs)
+
+    def predict(
+        self,
+        train_tsdf: TimeSeriesDataFrame,
+        test_tsdf: TimeSeriesDataFrame,
+    ) -> TimeSeriesDataFrame:
+        """
+        Predict on each time series individually (local forecasting).
+        """
+
+        logger.info(f"Predicting {len(train_tsdf.item_ids)} time series...")
+
+        return self.worker.predict(train_tsdf, test_tsdf)
+
+
+class TabPFNTimeSeriesPredictor(TimeSeriesPredictor):
     """
     Given a TimeSeriesDataFrame (multiple time series), perform prediction on each time series individually.
     """
@@ -24,24 +64,19 @@ class TabPFNTimeSeriesPredictor:
         tabpfn_mode: TabPFNMode = TabPFNMode.CLIENT,
         config: dict = TABPFN_TS_DEFAULT_CONFIG,
     ) -> None:
-        worker_mapping = {
-            TabPFNMode.CLIENT: lambda: TabPFNClient(config),
-            TabPFNMode.LOCAL: lambda: LocalTabPFN(config),
-            TabPFNMode.MOCK: lambda: MockTabPFN(config),
+        inference_engine_mapping = {
+            TabPFNMode.CLIENT: lambda: TabPFNClientInferenceEngine(config),
+            TabPFNMode.LOCAL: lambda: LocalTabPFNInferenceEngine(config),
+            TabPFNMode.MOCK: lambda: MockTabPFNInferenceEngine(config),
         }
-        self.tabpfn_worker = worker_mapping[tabpfn_mode]()
 
-    def predict(
-        self,
-        train_tsdf: TimeSeriesDataFrame,  # with features and target
-        test_tsdf: TimeSeriesDataFrame,  # with features only
-    ) -> TimeSeriesDataFrame:
-        """
-        Predict on each time series individually (local forecasting).
-        """
+        worker_mapping = {
+            TabPFNMode.CLIENT: CPUParallelWorker,
+            TabPFNMode.LOCAL: GPUParallelWorker,
+            TabPFNMode.MOCK: CPUParallelWorker,
+        }
 
-        logger.info(
-            f"Predicting {len(train_tsdf.item_ids)} time series with config{self.tabpfn_worker.config}"
+        self.inference_engine = inference_engine_mapping[tabpfn_mode]()
+        self.worker = worker_mapping[tabpfn_mode](
+            inference_routine=self.inference_engine.run,
         )
-
-        return self.tabpfn_worker.predict(train_tsdf, test_tsdf)

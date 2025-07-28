@@ -76,7 +76,7 @@ class TestTabPFNTimeSeriesPredictor(unittest.TestCase):
     def test_init_with_default_mode(self):
         """Test that the predictor initializes with default mode (CLIENT)"""
         predictor = TabPFNTimeSeriesPredictor()
-        self.assertIsNotNone(predictor.tabpfn_worker)
+        self.assertIsNotNone(predictor.worker)
 
     def test_init_with_local_mode_without_gpu(self):
         """Test that the predictor initializes with LOCAL mode"""
@@ -87,12 +87,12 @@ class TestTabPFNTimeSeriesPredictor(unittest.TestCase):
     def test_init_with_local_mode_with_gpu(self, mock_is_available):
         """Test that the predictor initializes with LOCAL mode"""
         predictor = TabPFNTimeSeriesPredictor(tabpfn_mode=TabPFNMode.LOCAL)
-        self.assertIsNotNone(predictor.tabpfn_worker)
+        self.assertIsNotNone(predictor.worker)
 
     def test_init_with_mock_mode(self):
         """Test that the predictor initializes with MOCK mode"""
         predictor = TabPFNTimeSeriesPredictor(tabpfn_mode=TabPFNMode.MOCK)
-        self.assertIsNotNone(predictor.tabpfn_worker)
+        self.assertIsNotNone(predictor.worker)
 
     def test_predict_calls_worker_predict(self):
         """Test that predict method calls the worker's predict method"""
