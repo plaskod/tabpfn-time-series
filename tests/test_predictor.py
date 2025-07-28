@@ -2,7 +2,7 @@ import os
 import unittest
 import pandas as pd
 import numpy as np
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from tabpfn_time_series import (
     TimeSeriesDataFrame,
@@ -76,7 +76,7 @@ class TestTabPFNTimeSeriesPredictor(unittest.TestCase):
     def test_init_with_default_mode(self):
         """Test that the predictor initializes with default mode (CLIENT)"""
         predictor = TabPFNTimeSeriesPredictor()
-        self.assertIsNotNone(predictor.tabpfn_worker)
+        self.assertIsNotNone(predictor.worker)
 
     def test_init_with_local_mode_without_gpu(self):
         """Test that the predictor initializes with LOCAL mode"""
@@ -87,12 +87,7 @@ class TestTabPFNTimeSeriesPredictor(unittest.TestCase):
     def test_init_with_local_mode_with_gpu(self, mock_is_available):
         """Test that the predictor initializes with LOCAL mode"""
         predictor = TabPFNTimeSeriesPredictor(tabpfn_mode=TabPFNMode.LOCAL)
-        self.assertIsNotNone(predictor.tabpfn_worker)
-
-    def test_init_with_mock_mode(self):
-        """Test that the predictor initializes with MOCK mode"""
-        predictor = TabPFNTimeSeriesPredictor(tabpfn_mode=TabPFNMode.MOCK)
-        self.assertIsNotNone(predictor.tabpfn_worker)
+        self.assertIsNotNone(predictor.worker)
 
     def test_predict_calls_worker_predict(self):
         """Test that predict method calls the worker's predict method"""
@@ -101,22 +96,6 @@ class TestTabPFNTimeSeriesPredictor(unittest.TestCase):
         result = predictor.predict(self.train_tsdf, self.test_tsdf)
 
         assert result is not None
-
-    @patch("tabpfn_time_series.predictor.MockTabPFN")
-    def test_predict_with_mock_mode(self, mock_tabpfn):
-        """Test prediction with mock mode"""
-        # Setup mock
-        mock_instance = MagicMock()
-        mock_tabpfn.return_value = mock_instance
-        mock_instance.predict.return_value = self.test_tsdf.copy()
-
-        # Create predictor and call predict
-        predictor = TabPFNTimeSeriesPredictor(tabpfn_mode=TabPFNMode.MOCK)
-        result = predictor.predict(self.train_tsdf, self.test_tsdf)
-
-        # Assert
-        mock_instance.predict.assert_called_once()
-        self.assertIsInstance(result, TimeSeriesDataFrame)
 
 
 if __name__ == "__main__":
