@@ -176,7 +176,7 @@ class CPUParallelWorker(ParallelWorker):
         test_tsdf: TimeSeriesDataFrame,
     ):
         predictions = Parallel(
-            n_jobs=self.num_workers,
+            n_jobs=min(self.num_workers, len(train_tsdf.item_ids)),
             backend="loky",
         )(
             delayed(self._prediction_routine)(
