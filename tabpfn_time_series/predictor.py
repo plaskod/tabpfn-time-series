@@ -1,7 +1,6 @@
 import logging
 from enum import Enum
-
-from typing import Callable, Type
+from typing import Type
 
 from tabpfn_time_series.ts_dataframe import TimeSeriesDataFrame
 from tabpfn_time_series.defaults import TABPFN_TS_DEFAULT_CONFIG
@@ -11,9 +10,9 @@ from tabpfn_time_series.worker.parallel import (
     GPUParallelWorker,
 )
 from tabpfn_time_series.worker.tabpfn_inference_engine import (
+    BaseInferenceEngine,
     TabPFNClientInferenceEngine,
     LocalTabPFNInferenceEngine,
-    MockTabPFNInferenceEngine,
 )
 
 
@@ -23,7 +22,6 @@ logger = logging.getLogger(__name__)
 class TabPFNMode(Enum):
     LOCAL = "tabpfn-local"
     CLIENT = "tabpfn-client"
-    MOCK = "tabpfn-mock"
 
 
 class TimeSeriesPredictor:
@@ -33,12 +31,11 @@ class TimeSeriesPredictor:
 
     def __init__(
         self,
-        inference_routine: Callable,
+        inference_engine: Type[BaseInferenceEngine],
         worker_class: Type[ParallelWorker],
         worker_kwargs: dict = {},
     ):
-        self.inference_routine = inference_routine
-        self.worker = worker_class(inference_routine, **worker_kwargs)
+        self.worker = worker_class(inference_engine.predict, **worker_kwargs)
 
     def predict(
         self,
@@ -62,24 +59,25 @@ class TabPFNTimeSeriesPredictor(TimeSeriesPredictor):
     def __init__(
         self,
         tabpfn_mode: TabPFNMode = TabPFNMode.CLIENT,
-        config: dict = TABPFN_TS_DEFAULT_CONFIG,
+        tabpfn_config: dict = TABPFN_TS_DEFAULT_CONFIG,
+        tabpfn_output_selection: str = "median",  # mean or median
     ) -> None:
         inference_engine_mapping = {
-            TabPFNMode.CLIENT: lambda: TabPFNClientInferenceEngine(config),
-            TabPFNMode.LOCAL: lambda: LocalTabPFNInferenceEngine(config),
-            TabPFNMode.MOCK: lambda: MockTabPFNInferenceEngine(config),
+            TabPFNMode.CLIENT: TabPFNClientInferenceEngine,
+            TabPFNMode.LOCAL: LocalTabPFNInferenceEngine,
         }
 
         worker_mapping = {
             TabPFNMode.CLIENT: CPUParallelWorker,
             TabPFNMode.LOCAL: GPUParallelWorker,
-            TabPFNMode.MOCK: CPUParallelWorker,
         }
 
-        inference_engine = inference_engine_mapping[tabpfn_mode]()
+        inference_engine = inference_engine_mapping[tabpfn_mode](
+            tabpfn_config,
+            tabpfn_output_selection,
+        )
 
         super().__init__(
-            inference_routine=inference_engine.run,
+            inference_engine=inference_engine,
             worker_class=worker_mapping[tabpfn_mode],
-            worker_kwargs={},
         )

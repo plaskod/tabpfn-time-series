@@ -89,11 +89,6 @@ class TestTabPFNTimeSeriesPredictor(unittest.TestCase):
         predictor = TabPFNTimeSeriesPredictor(tabpfn_mode=TabPFNMode.LOCAL)
         self.assertIsNotNone(predictor.worker)
 
-    def test_init_with_mock_mode(self):
-        """Test that the predictor initializes with MOCK mode"""
-        predictor = TabPFNTimeSeriesPredictor(tabpfn_mode=TabPFNMode.MOCK)
-        self.assertIsNotNone(predictor.worker)
-
     def test_predict_calls_worker_predict(self):
         """Test that predict method calls the worker's predict method"""
         # Create predictor and call predict
@@ -101,15 +96,6 @@ class TestTabPFNTimeSeriesPredictor(unittest.TestCase):
         result = predictor.predict(self.train_tsdf, self.test_tsdf)
 
         assert result is not None
-
-    def test_predict_with_mock_mode(self):
-        """Test prediction with mock mode"""
-        # Create predictor and call predict
-        predictor = TabPFNTimeSeriesPredictor(tabpfn_mode=TabPFNMode.MOCK)
-        result = predictor.predict(self.train_tsdf, self.test_tsdf)
-
-        self.assertIsInstance(result, TimeSeriesDataFrame)
-        self.assertEqual(len(result.item_ids), 2)
 
 
 if __name__ == "__main__":

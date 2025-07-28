@@ -90,12 +90,11 @@ class GPUParallelWorker(ParallelWorker):
     def __init__(
         self,
         inference_routine: Callable,
-        num_gpus: int = None,
-        num_workers_per_gpu: int = 4,
+        num_workers_per_gpu: int = 1,
     ):
         super().__init__(inference_routine)
 
-        self.num_gpus = num_gpus if num_gpus is not None else torch.cuda.device_count()
+        self.num_gpus = torch.cuda.device_count()
         self.num_workers_per_gpu = num_workers_per_gpu
         self.total_num_workers = self.num_gpus * self.num_workers_per_gpu
 
@@ -107,6 +106,13 @@ class GPUParallelWorker(ParallelWorker):
         train_tsdf: TimeSeriesDataFrame,
         test_tsdf: TimeSeriesDataFrame,
     ):
+        if self.num_gpus == 1:
+            return self._prediction_routine_per_gpu(
+                train_tsdf,
+                test_tsdf,
+                gpu_id=0,
+            )
+
         # Split data into chunks for parallel inference on each GPU
         #   since the time series are of different lengths, we shuffle
         #   the item_ids s.t. the workload is distributed evenly across GPUs

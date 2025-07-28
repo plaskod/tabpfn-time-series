@@ -1,11 +1,14 @@
 import numpy as np
-from copy import deepcopy
 
+from sklearn.base import RegressorMixin
 from tabpfn import TabPFNRegressor
-from tabpfn_client import init, TabPFNRegressor as TabPFNClientRegressor
+from tabpfn_client import (
+    init as tabpfn_client_init,
+    TabPFNRegressor as TabPFNClientRegressor,
+)
 
-from tabpfn_time_series.defaults import TABPFN_TS_DEFAULT_QUANTILE_CONFIG
-from tabpfn_time_series.worker.base_inference_engine import InferenceEngine
+from tabpfn_time_series.defaults import DEFAULT_QUANTILE_CONFIG
+from tabpfn_time_series.worker.base_inference_engine import BaseInferenceEngine
 
 
 def process_tabpfn_pred_output(
@@ -13,6 +16,7 @@ def process_tabpfn_pred_output(
     output_selection: str,
     quantiles: list[float | str],
 ) -> dict[str, np.ndarray]:
+    """Translates raw TabPFN output to the standardized dictionary format."""
     result = {"target": pred_output[output_selection]}
 
     result.update({q: q_pred for q, q_pred in zip(quantiles, pred_output["quantiles"])})
@@ -20,31 +24,64 @@ def process_tabpfn_pred_output(
     return result
 
 
-class TabPFNClientInferenceEngine(InferenceEngine):
-    def __init__(self, tabpfn_config: dict):
-        init()
-
-        self.tabpfn_config = deepcopy(tabpfn_config)
-        self.tabpfn_config["tabpfn_internal"]["model_path"] = self._parse_model_name(
-            self.tabpfn_config["tabpfn_internal"]["model_path"]
+class BaseTabPFNInferenceEngine(BaseInferenceEngine):
+    def __init__(
+        self,
+        model_class: RegressorMixin,
+        model_config: dict,
+        tabpfn_output_selection: str,
+    ):
+        super().__init__(
+            model_class,
+            model_config,
+            inference_kwargs={
+                "predict": {
+                    "output_type": "main",
+                }
+            },
         )
 
-    def run(
+        self.tabpfn_output_selection = tabpfn_output_selection
+
+    def predict(
         self,
         train_X: np.ndarray,
         train_y: np.ndarray,
         test_X: np.ndarray,
-        quantiles: list[float | str] = TABPFN_TS_DEFAULT_QUANTILE_CONFIG,
-    ) -> dict[str, np.ndarray]:
-        model = TabPFNClientRegressor(**self.tabpfn_config["tabpfn_internal"])
-
-        model.fit(train_X, train_y)
-        pred_output = model.predict(test_X, output_type="main")
+        quantiles: list[float | str] = DEFAULT_QUANTILE_CONFIG,
+    ):
+        tabpfn_pred_output = super().predict(
+            train_X=train_X,
+            train_y=train_y,
+            test_X=test_X,
+        )
 
         return process_tabpfn_pred_output(
-            pred_output,
-            self.tabpfn_config["tabpfn_output_selection"],
+            tabpfn_pred_output,
+            self.tabpfn_output_selection,
             quantiles,
+        )
+
+
+class TabPFNClientInferenceEngine(BaseTabPFNInferenceEngine):
+    def __init__(
+        self,
+        tabpfn_config: dict,
+        tabpfn_output_selection: str,
+    ):
+        super().__init__(
+            model_class=TabPFNClientRegressor,
+            model_config=tabpfn_config,
+            tabpfn_output_selection=tabpfn_output_selection,
+        )
+
+        # Perform initialization of the TabPFN client (authentication)
+        tabpfn_client_init()
+
+        # Parse the model name to get the correct model path
+        # that is supported by the TabPFN client
+        self.model_config["model_path"] = self._parse_model_name(
+            self.model_config["model_path"]
         )
 
     def _parse_model_name(self, model_name: str) -> str:
@@ -58,27 +95,21 @@ class TabPFNClientInferenceEngine(InferenceEngine):
         )
 
 
-class LocalTabPFNInferenceEngine(InferenceEngine):
-    def __init__(self, tabpfn_config: dict):
-        self.tabpfn_config = deepcopy(tabpfn_config)
-        self._download_model(self.tabpfn_config["tabpfn_internal"]["model_path"])
-
-    def run(
+class LocalTabPFNInferenceEngine(BaseTabPFNInferenceEngine):
+    def __init__(
         self,
-        train_X: np.ndarray,
-        train_y: np.ndarray,
-        test_X: np.ndarray,
-        quantiles: list[float | str] = TABPFN_TS_DEFAULT_QUANTILE_CONFIG,
-    ) -> dict[str, np.ndarray]:
-        model = TabPFNRegressor(**self.tabpfn_config["tabpfn_internal"])
+        tabpfn_config: dict,
+        tabpfn_output_selection: str,
+    ):
+        super().__init__(
+            model_class=TabPFNRegressor,
+            model_config=tabpfn_config,
+            tabpfn_output_selection=tabpfn_output_selection,
+        )
 
-        model.fit(train_X, train_y)
-        pred_output = model.predict(test_X, output_type="main")
-
-        return process_tabpfn_pred_output(
-            pred_output,
-            self.tabpfn_config["tabpfn_output_selection"],
-            quantiles,
+        # Download the model if needed (for once)
+        self.model_config["model_path"] = self._download_model(
+            self.model_config["model_path"]
         )
 
     @staticmethod
@@ -99,20 +130,3 @@ class LocalTabPFNInferenceEngine(InferenceEngine):
                 version="v2",
                 model_name=model_name,
             )
-
-
-class MockTabPFNInferenceEngine(InferenceEngine):
-    def __init__(self, tabpfn_config: dict):
-        pass
-
-    def run(
-        self,
-        train_X: np.ndarray,
-        train_y: np.ndarray,
-        test_X: np.ndarray,
-        quantiles: list[float | str] = TABPFN_TS_DEFAULT_QUANTILE_CONFIG,
-    ) -> dict[str, np.ndarray]:
-        result = {"target": np.zeros(len(test_X))}
-        result.update({q: np.zeros(len(test_X)) for q in quantiles})
-
-        return result
