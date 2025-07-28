@@ -10,7 +10,7 @@ from tabpfn_time_series.worker.parallel import (
     CPUParallelWorker,
     GPUParallelWorker,
 )
-from tabpfn_time_series.worker.base_inference_engine import (
+from tabpfn_time_series.worker.tabpfn_inference_engine import (
     TabPFNClientInferenceEngine,
     LocalTabPFNInferenceEngine,
     MockTabPFNInferenceEngine,

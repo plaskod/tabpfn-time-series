@@ -11,7 +11,7 @@ def process_tabpfn_pred_output(
     pred_output: dict,
     output_selection: str,
     quantiles: list[float | str],
-) -> dict:
+) -> dict[str, np.ndarray]:
     result = {"target": pred_output[output_selection]}
 
     result.update({q: q_pred for q, q_pred in zip(quantiles, pred_output["quantiles"])})
