@@ -111,7 +111,7 @@ class MockTabPFNInferenceEngine(InferenceEngine):
         test_X: np.ndarray,
         quantiles: list[float | str] = TABPFN_TS_DEFAULT_QUANTILE_CONFIG,
     ) -> dict[str, np.ndarray]:
-        return {
-            "target": np.zeros(len(test_X)),
-            "quantiles": np.zeros((len(test_X), len(quantiles))),
-        }
+        result = {"target": np.zeros(len(test_X))}
+        result.update({q: np.zeros(len(test_X)) for q in quantiles})
+
+        return result

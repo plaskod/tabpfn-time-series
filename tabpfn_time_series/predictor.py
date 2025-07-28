@@ -76,7 +76,10 @@ class TabPFNTimeSeriesPredictor(TimeSeriesPredictor):
             TabPFNMode.MOCK: CPUParallelWorker,
         }
 
-        self.inference_engine = inference_engine_mapping[tabpfn_mode]()
-        self.worker = worker_mapping[tabpfn_mode](
-            inference_routine=self.inference_engine.run,
+        inference_engine = inference_engine_mapping[tabpfn_mode]()
+
+        super().__init__(
+            inference_routine=inference_engine.run,
+            worker_class=worker_mapping[tabpfn_mode],
+            worker_kwargs={},
         )

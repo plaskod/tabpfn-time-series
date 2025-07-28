@@ -7,10 +7,6 @@ from tabpfn_time_series.defaults import TABPFN_TS_DEFAULT_QUANTILE_CONFIG
 
 class InferenceEngine(ABC):
     @abstractmethod
-    def __init__(self):
-        pass
-
-    @abstractmethod
     def run(
         self,
         train_X: np.ndarray,
