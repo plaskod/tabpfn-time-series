@@ -8,7 +8,7 @@ dynamic = ["version"]
 authors = [{ name = "Liam Shi Bin Hoo", email = "hoos@tf.uni-freiburg.de" }]
 description = "Zero-shot time series forecasting with TabPFNv2"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: Apache Software License",
@@ -42,8 +42,15 @@ dev = [
     "matplotlib>=3.10.3",
 ]
 
+eval_tabdpt = [
+    "tabdpt @ git+https://github.com/liam-sbhoo/TabDPT-inference.git"
+]
+
 [tool.hatch.version]
 source = "vcs"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 exclude = ["docs", "gift_eval", "tabpfn_time_series/experimental"]
