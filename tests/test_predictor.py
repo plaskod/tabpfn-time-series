@@ -2,7 +2,7 @@ import os
 import unittest
 import pandas as pd
 import numpy as np
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from tabpfn_time_series import (
     TimeSeriesDataFrame,
@@ -102,21 +102,14 @@ class TestTabPFNTimeSeriesPredictor(unittest.TestCase):
 
         assert result is not None
 
-    @patch("tabpfn_time_series.predictor.MockTabPFN")
-    def test_predict_with_mock_mode(self, mock_tabpfn):
+    def test_predict_with_mock_mode(self):
         """Test prediction with mock mode"""
-        # Setup mock
-        mock_instance = MagicMock()
-        mock_tabpfn.return_value = mock_instance
-        mock_instance.predict.return_value = self.test_tsdf.copy()
-
         # Create predictor and call predict
         predictor = TabPFNTimeSeriesPredictor(tabpfn_mode=TabPFNMode.MOCK)
         result = predictor.predict(self.train_tsdf, self.test_tsdf)
 
-        # Assert
-        mock_instance.predict.assert_called_once()
         self.assertIsInstance(result, TimeSeriesDataFrame)
+        self.assertEqual(len(result.item_ids), 2)
 
 
 if __name__ == "__main__":

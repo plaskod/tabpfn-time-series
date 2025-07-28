@@ -1,4 +1,5 @@
 import numpy as np
+from copy import deepcopy
 
 from tabpfn import TabPFNRegressor
 from tabpfn_client import init, TabPFNRegressor as TabPFNClientRegressor
@@ -23,7 +24,7 @@ class TabPFNClientInferenceEngine(InferenceEngine):
     def __init__(self, tabpfn_config: dict):
         init()
 
-        self.tabpfn_config = tabpfn_config.copy()
+        self.tabpfn_config = deepcopy(tabpfn_config)
         self.tabpfn_config["tabpfn_internal"]["model_path"] = self._parse_model_name(
             self.tabpfn_config["tabpfn_internal"]["model_path"]
         )
@@ -59,8 +60,8 @@ class TabPFNClientInferenceEngine(InferenceEngine):
 
 class LocalTabPFNInferenceEngine(InferenceEngine):
     def __init__(self, tabpfn_config: dict):
-        self._download_model(tabpfn_config["tabpfn_internal"]["model_path"])
-        self.tabpfn_config = tabpfn_config.copy()
+        self.tabpfn_config = deepcopy(tabpfn_config)
+        self._download_model(self.tabpfn_config["tabpfn_internal"]["model_path"])
 
     def run(
         self,
