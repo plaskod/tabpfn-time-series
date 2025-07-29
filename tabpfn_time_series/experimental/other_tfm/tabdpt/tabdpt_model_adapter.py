@@ -1,4 +1,4 @@
-from tabpfn_time_series.worker.base_inference_engine import BaseInferenceEngine
+from tabpfn_time_series.worker.model_adapter import ModelAdapter
 from tabpfn_time_series.defaults import DEFAULT_QUANTILE_CONFIG
 
 import numpy as np
@@ -6,19 +6,22 @@ import numpy as np
 from tabdpt import TabDPTRegressor
 
 
-class TabDPTInferenceEngine(BaseInferenceEngine):
+class TabDPTModelAdapter(ModelAdapter):
+    _DEFAULT_MODEL_CONFIG = {
+        "use_flash": False,
+        "compile": False,
+        "device": "cuda",
+    }
+
     def __init__(
         self,
-        inference_kwargs: dict = {},
+        model_config: dict = _DEFAULT_MODEL_CONFIG,
+        inference_config: dict = {},
     ):
         super().__init__(
             model_class=TabDPTRegressor,
-            model_config={
-                "use_flash": False,
-                "compile": False,
-                "device": "cuda",
-            },
-            inference_kwargs=inference_kwargs,
+            model_config=model_config,
+            inference_config=inference_config,
         )
 
     def predict(

@@ -1,6 +1,6 @@
 import logging
 from enum import Enum
-from typing import Type
+from typing import Type, TypeAlias, Dict, Any
 
 from tabpfn_time_series.ts_dataframe import TimeSeriesDataFrame
 from tabpfn_time_series.defaults import TABPFN_TS_DEFAULT_CONFIG
@@ -9,10 +9,10 @@ from tabpfn_time_series.worker.parallel import (
     CPUParallelWorker,
     GPUParallelWorker,
 )
-from tabpfn_time_series.worker.tabpfn_inference_engine import (
-    BaseInferenceEngine,
-    TabPFNClientInferenceEngine,
-    LocalTabPFNInferenceEngine,
+from tabpfn_time_series.worker.tabpfn_model_adapter import (
+    ModelAdapter,
+    TabPFNClientModelAdapter,
+    LocalTabPFNModelAdapter,
 )
 
 
@@ -31,11 +31,11 @@ class TimeSeriesPredictor:
 
     def __init__(
         self,
-        inference_engine: Type[BaseInferenceEngine],
+        model_adapter: Type[ModelAdapter],
         worker_class: Type[ParallelWorker],
         worker_kwargs: dict = {},
     ):
-        self.worker = worker_class(inference_engine.predict, **worker_kwargs)
+        self.worker = worker_class(model_adapter.predict, **worker_kwargs)
 
     def predict(
         self,
@@ -53,7 +53,9 @@ class TimeSeriesPredictor:
 
 class TabPFNTimeSeriesPredictor(TimeSeriesPredictor):
     """
-    Given a TimeSeriesDataFrame (multiple time series), perform prediction on each time series individually.
+    A TabPFN-based time series predictor.
+
+    Designed for TabPFNClient and TabPFNRegressor.
     """
 
     def __init__(
@@ -62,22 +64,55 @@ class TabPFNTimeSeriesPredictor(TimeSeriesPredictor):
         tabpfn_config: dict = TABPFN_TS_DEFAULT_CONFIG,
         tabpfn_output_selection: str = "median",  # mean or median
     ) -> None:
-        inference_engine_mapping = {
-            TabPFNMode.CLIENT: TabPFNClientInferenceEngine,
-            TabPFNMode.LOCAL: LocalTabPFNInferenceEngine,
+        model_adapter_and_worker_mapping = {
+            TabPFNMode.CLIENT: (TabPFNClientModelAdapter, CPUParallelWorker),
+            TabPFNMode.LOCAL: (LocalTabPFNModelAdapter, GPUParallelWorker),
         }
+        model_adapter, worker_class = model_adapter_and_worker_mapping[tabpfn_mode]
 
-        worker_mapping = {
-            TabPFNMode.CLIENT: CPUParallelWorker,
-            TabPFNMode.LOCAL: GPUParallelWorker,
-        }
-
-        inference_engine = inference_engine_mapping[tabpfn_mode](
+        model_adapter = model_adapter(
             tabpfn_config,
             tabpfn_output_selection,
         )
 
         super().__init__(
-            inference_engine=inference_engine,
-            worker_class=worker_mapping[tabpfn_mode],
+            model_adapter=model_adapter,
+            worker_class=worker_class,
+        )
+
+
+ModelInferenceConfig: TypeAlias = Dict[str, Any]
+"""
+Configuration dictionary for model adapters.
+
+Expected structure:
+{
+    "fit": {
+        "param1": value1,
+        "param2": value2,
+        ...
+    },
+    "predict": {
+        "param1": value1,
+        "param2": value2,
+        ...
+    }
+}
+"""
+
+
+class GenericTimeSeriesPredictor(TimeSeriesPredictor):
+    def __init__(
+        self,
+        model_adapter_class: Type[ModelAdapter],
+        model_adapter_config: Dict[str, Any],
+        worker_class: Type[ParallelWorker] = GPUParallelWorker,
+        worker_config: Dict[str, Any] = {},
+    ):
+        model_adapter = model_adapter_class(**model_adapter_config)
+
+        super().__init__(
+            model_adapter=model_adapter,
+            worker_class=worker_class,
+            worker_kwargs=worker_config,
         )

@@ -8,7 +8,7 @@ from tabpfn_client import (
 )
 
 from tabpfn_time_series.defaults import DEFAULT_QUANTILE_CONFIG
-from tabpfn_time_series.worker.base_inference_engine import BaseInferenceEngine
+from tabpfn_time_series.worker.model_adapter import ModelAdapter
 
 
 def process_tabpfn_pred_output(
@@ -24,7 +24,7 @@ def process_tabpfn_pred_output(
     return result
 
 
-class BaseTabPFNInferenceEngine(BaseInferenceEngine):
+class BaseTabPFNModelAdapter(ModelAdapter):
     def __init__(
         self,
         model_class: RegressorMixin,
@@ -34,7 +34,7 @@ class BaseTabPFNInferenceEngine(BaseInferenceEngine):
         super().__init__(
             model_class,
             model_config,
-            inference_kwargs={
+            inference_config={
                 "predict": {
                     "output_type": "main",
                 }
@@ -63,7 +63,7 @@ class BaseTabPFNInferenceEngine(BaseInferenceEngine):
         )
 
 
-class TabPFNClientInferenceEngine(BaseTabPFNInferenceEngine):
+class TabPFNClientModelAdapter(BaseTabPFNModelAdapter):
     def __init__(
         self,
         tabpfn_config: dict,
@@ -95,7 +95,7 @@ class TabPFNClientInferenceEngine(BaseTabPFNInferenceEngine):
         )
 
 
-class LocalTabPFNInferenceEngine(BaseTabPFNInferenceEngine):
+class LocalTabPFNModelAdapter(BaseTabPFNModelAdapter):
     def __init__(
         self,
         tabpfn_config: dict,
@@ -130,3 +130,5 @@ class LocalTabPFNInferenceEngine(BaseTabPFNInferenceEngine):
                 version="v2",
                 model_name=model_name,
             )
+
+        return model_path

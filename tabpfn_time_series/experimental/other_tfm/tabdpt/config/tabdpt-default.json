@@ -1,11 +1,19 @@
 {
-    "predictor_name": "TabDPTTimeSeriesPredictor",
+    "predictor_name": "GenericTimeSeriesPredictor",
     "predictor_config": {
-        "inference_kwargs": {
-            "predict": {
-                "n_ensembles": 8,
-                "context_size": 10000,
-                "seed": 42
+        "model_adapter_class": "TabDPTModelAdapter",
+        "model_adapter_config": {
+            "model_config": {
+                "use_flash": false,
+                "compile": false,
+                "device": "cuda"
+            },
+            "inference_config": {
+                "predict": {
+                    "n_ensembles": 8,
+                    "context_size": 10000,
+                    "seed": 42
+                }
             }
         }
     },
