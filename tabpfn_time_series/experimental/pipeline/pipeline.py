@@ -6,14 +6,14 @@ import pandas as pd
 from gluonts.model.forecast import QuantileForecast, Forecast
 from gluonts.itertools import batcher
 from gluonts.dataset.field_names import FieldName
-from autogluon.timeseries import TimeSeriesDataFrame
 # from torch.cuda import is_available as torch_cuda_is_available
 
 from tabpfn_time_series.data_preparation import generate_test_X
 from tabpfn_time_series import (
     # TabPFNMode,
-    TABPFN_TS_DEFAULT_QUANTILE_CONFIG,
+    TimeSeriesDataFrame,
 )
+from tabpfn_time_series.defaults import DEFAULT_QUANTILE_CONFIG
 
 from tabpfn_time_series.experimental.features import (
     FeatureTransformer,
@@ -103,12 +103,12 @@ class TabPFNTSPipeline:
         train_tsdf, test_tsdf = self._preprocess_test_data(test_data_input)
 
         # Generate predictions
-        pred: TimeSeriesDataFrame = self.tabpfn_predictor.predict(train_tsdf, test_tsdf)
+        pred: TimeSeriesDataFrame = self.predictor.predict(train_tsdf, test_tsdf)
         pred = pred.drop(columns=["target"])
 
         # Pre-allocate forecasts list and get forecast quantile keys
         forecasts = [None] * len(pred.item_ids)
-        forecast_keys = list(map(str, TABPFN_TS_DEFAULT_QUANTILE_CONFIG))
+        forecast_keys = list(map(str, DEFAULT_QUANTILE_CONFIG))
 
         # Generate QuantileForecast objects for each time series
         for i, (_, item_data) in enumerate(pred.groupby(level="item_id")):

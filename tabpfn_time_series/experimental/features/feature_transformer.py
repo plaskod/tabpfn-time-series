@@ -2,7 +2,7 @@ from typing import List, Tuple
 
 import pandas as pd
 
-from autogluon.timeseries import TimeSeriesDataFrame
+from tabpfn_time_series.ts_dataframe import TimeSeriesDataFrame
 from tabpfn_time_series.experimental.features.feature_generator_base import (
     FeatureGenerator,
 )
@@ -31,9 +31,9 @@ class FeatureTransformer:
         train_tsdf = tsdf.iloc[: len(train_tsdf)]
         test_tsdf = tsdf.iloc[len(train_tsdf) :]
 
-        assert (
-            not train_tsdf[target_column].isna().any()
-        ), "All target values in train_tsdf should be non-NaN"
+        assert not train_tsdf[target_column].isna().any(), (
+            "All target values in train_tsdf should be non-NaN"
+        )
         assert test_tsdf[target_column].isna().all()
 
         return train_tsdf, test_tsdf
