@@ -7,7 +7,9 @@ from tabpfn_time_series import TabPFNTimeSeriesPredictor
 from tabpfn_time_series.experimental.noisy_transform.tabpfn_noisy_transform_predictor import (
     TabPFNNoisyTranformPredictor,
 )
-
+from tabpfn_time_series.experimental.tabdpt.tabdpt_predictor import (
+    TabDPTTimeSeriesPredictor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -19,12 +21,13 @@ class PipelineConfig:
     features: dict
     context_length: int
     slice_before_featurization: bool = True
-    pipeline_name: str = "TabPFNTSPipeline"
+    pipeline_name: str = "TimeSeriesEvalPipeline"
     additional_pipeline_config: dict = field(default_factory=dict)
     use_covariates: bool = False
     _PREDICTOR_NAME_TO_CLASS: ClassVar[Dict[str, Type]] = {
         "TabPFNTimeSeriesPredictor": TabPFNTimeSeriesPredictor,
         "TabPFNNoisyTranformPredictor": TabPFNNoisyTranformPredictor,
+        "TabDPTTimeSeriesPredictor": TabDPTTimeSeriesPredictor,
     }
 
     @classmethod

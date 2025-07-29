@@ -1,10 +1,12 @@
 {
     "predictor_name": "TabDPTTimeSeriesPredictor",
     "predictor_config": {
-        "predict": {
-            "n_ensembles": 8,
-            "context_size": 10000,
-            "seed": 42
+        "inference_kwargs": {
+            "predict": {
+                "n_ensembles": 8,
+                "context_size": 10000,
+                "seed": 42
+            }
         }
     },
     "features": {

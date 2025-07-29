@@ -6,13 +6,9 @@ import pandas as pd
 from gluonts.model.forecast import QuantileForecast, Forecast
 from gluonts.itertools import batcher
 from gluonts.dataset.field_names import FieldName
-# from torch.cuda import is_available as torch_cuda_is_available
 
+from tabpfn_time_series import TimeSeriesDataFrame
 from tabpfn_time_series.data_preparation import generate_test_X
-from tabpfn_time_series import (
-    # TabPFNMode,
-    TimeSeriesDataFrame,
-)
 from tabpfn_time_series.defaults import DEFAULT_QUANTILE_CONFIG
 
 from tabpfn_time_series.experimental.features import (
@@ -42,7 +38,7 @@ COVARIATE_FIELD_TYPES = {
 }
 
 
-class TabPFNTSPipeline:
+class TimeSeriesEvalPipeline:
     FALLBACK_FEATURES = [
         RunningIndexFeature(),
         CalendarFeature(),
@@ -57,14 +53,10 @@ class TabPFNTSPipeline:
     ):
         self.ds_prediction_length = ds_prediction_length
         self.ds_freq = ds_freq
+
         predictor_class = PipelineConfig.get_predictor_class(config.predictor_name)
-        # self.tabpfn_predictor = predictor_class(
-        #     tabpfn_mode=TabPFNMode.LOCAL
-        #     if torch_cuda_is_available()
-        #     else TabPFNMode.CLIENT,
-        #     config=config.predictor_config,
-        # )
         self.predictor = predictor_class(**config.predictor_config)
+
         self.context_length = config.context_length
         self.slice_before_featurization = config.slice_before_featurization
         self.use_covariates = config.use_covariates
@@ -189,7 +181,9 @@ class TabPFNTSPipeline:
 
             # Add covariates if needed
             if use_covariates:
-                covariate_df = TabPFNTSPipeline._process_covariates(item, timestamp)
+                covariate_df = TimeSeriesEvalPipeline._process_covariates(
+                    item, timestamp
+                )
                 if not covariate_df.empty:
                     df = pd.concat([df, covariate_df], axis=1)
                 else:
