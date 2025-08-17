@@ -34,7 +34,7 @@ class TabPFNTSPredictor:
         self,
         ds_prediction_length: int,
         ds_freq: str,
-        tabpfn_mode: TabPFNMode = TabPFNMode.CLIENT,
+        tabpfn_mode: TabPFNMode = TabPFNMode.LOCAL,
         context_length: int = 4096,
         debug: bool = False,
     ):
