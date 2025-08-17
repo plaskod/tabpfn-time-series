@@ -29,14 +29,9 @@ from tabpfn_time_series.features import (
 logger = logging.getLogger(__name__)
 
 
-class TabPFNTSPredictor:
+class TabPFNTSPredictor:  # Keep the same class name your evaluate_multigpu.py expects
     """
     TabPFN-TS Predictor with automatic multi-GPU support using LOCAL mode
-    
-    When using TabPFNMode.LOCAL, the predictor automatically:
-    1. Detects the number of available GPUs
-    2. Sets num_workers = torch.cuda.device_count()
-    3. Distributes time series across GPUs for parallel processing
     """
     DEFAULT_FEATURES = [
         RunningIndexFeature(),
@@ -48,10 +43,10 @@ class TabPFNTSPredictor:
         self,
         ds_prediction_length: int,
         ds_freq: str,
-        tabpfn_mode: TabPFNMode = TabPFNMode.LOCAL,  # Use LOCAL for multi-GPU
+        tabpfn_mode: TabPFNMode = TabPFNMode.LOCAL,
         context_length: int = 4096,
         debug: bool = False,
-        num_workers: int = None,  # For compatibility, but not used with LOCAL mode
+        num_workers: int = None,  # Ignored - for compatibility only
         gpu_ids: list = None,      # Specify which GPUs to use
     ):
         self.ds_prediction_length = ds_prediction_length
@@ -59,80 +54,58 @@ class TabPFNTSPredictor:
         self.context_length = context_length
         self.debug = debug
         
-        # Configure GPU visibility BEFORE creating the predictor
-        if gpu_ids is not None:
-            # Set CUDA_VISIBLE_DEVICES to use specific GPUs
+        # Configure GPU usage (only if not already set)
+        if gpu_ids is not None and "CUDA_VISIBLE_DEVICES" not in os.environ:
             os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpu_ids))
             logger.info(f"Set CUDA_VISIBLE_DEVICES to: {os.environ['CUDA_VISIBLE_DEVICES']}")
         
-        # Check GPU availability
-        if tabpfn_mode == TabPFNMode.LOCAL and not torch.cuda.is_available():
-            raise ValueError("GPU is required for LOCAL TabPFN inference")
-        
-        # Log GPU configuration
-        if torch.cuda.is_available():
-            num_gpus = torch.cuda.device_count()
-            logger.info(f"CUDA Available: True")
-            logger.info(f"Number of visible GPUs: {num_gpus}")
-            logger.info(f"TabPFN will use {num_gpus} workers for parallel processing")
+        # Check GPU availability for LOCAL mode
+        if tabpfn_mode == TabPFNMode.LOCAL:
+            if not torch.cuda.is_available():
+                raise ValueError("GPU is required for LOCAL TabPFN inference")
             
-            for i in range(num_gpus):
-                logger.info(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
-        else:
-            logger.info(f"CUDA Available: False - using CLIENT mode")
+            num_gpus = torch.cuda.device_count()
+            logger.info(f"Auto-detected {num_gpus} GPUs for parallel processing")
+            logger.info(f"Available GPUs: {num_gpus}")
+            if torch.cuda.is_available():
+                for i in range(torch.cuda.device_count()):
+                    logger.info(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
         
-        # Initialize TabPFN predictor
-        # When using LOCAL mode, it automatically sets num_workers = torch.cuda.device_count()
-        # Do NOT pass num_workers as it's not a valid parameter
+        # Initialize TabPFN predictor - do NOT pass num_workers
         self.tabpfn_predictor = TabPFNTimeSeriesPredictor(
             tabpfn_mode=tabpfn_mode,
         )
         
-        # Verify the configuration
+        self.feature_transformer = FeatureTransformer(self.DEFAULT_FEATURES)
+        
+        # Log configuration
         if hasattr(self.tabpfn_predictor, 'worker'):
             if hasattr(self.tabpfn_predictor.worker, 'num_workers'):
-                actual_workers = self.tabpfn_predictor.worker.num_workers
-                logger.info(f"TabPFN worker configured with {actual_workers} workers")
-        
-        self.feature_transformer = FeatureTransformer(self.DEFAULT_FEATURES)
+                logger.info(f"TabPFN configured with {self.tabpfn_predictor.worker.num_workers} workers")
 
     def predict(self, test_data_input) -> Iterator[Forecast]:
-        logger.debug(f"Processing {len(test_data_input)} time series")
+        logger.debug(f"len(test_data_input): {len(test_data_input)}")
         
-        # Use larger batch size for multi-GPU processing
-        # This allows more time series to be distributed across GPUs
-        num_gpus = max(1, torch.cuda.device_count()) if torch.cuda.is_available() else 1
-        batch_size = min(1024 * num_gpus, len(test_data_input))
-        
-        logger.debug(f"Using batch size: {batch_size} for {num_gpus} GPUs")
+        # Process in larger batches to better utilize multiple GPUs
+        batch_size = min(1024 * max(1, torch.cuda.device_count()), len(test_data_input))
         
         forecasts = []
-        for batch_idx, batch in enumerate(batcher(test_data_input, batch_size=batch_size)):
-            logger.debug(f"Processing batch {batch_idx + 1}")
+        for batch in batcher(test_data_input, batch_size=batch_size):
             forecasts.extend(self._predict_batch(batch))
 
         return forecasts
 
     def _predict_batch(self, test_data_input):
-        batch_size = len(test_data_input)
-        logger.debug(f"Processing batch of size: {batch_size}")
+        logger.debug(f"Processing batch of size: {len(test_data_input)}")
         
-        # Log expected GPU distribution
+        # Log which GPUs will be used
         if self.debug and torch.cuda.is_available():
-            num_gpus = torch.cuda.device_count()
-            per_gpu = batch_size // num_gpus if batch_size >= num_gpus else batch_size
-            logger.debug(f"Expected distribution: ~{per_gpu} time series per GPU across {num_gpus} GPUs")
+            logger.debug(f"Batch will be distributed across {torch.cuda.device_count()} GPUs")
 
         # Preprocess the input data
         train_tsdf, test_tsdf = self._preprocess_test_data(test_data_input)
 
-        # Generate predictions
-        # The LocalTabPFN worker will automatically:
-        # 1. Shuffle and split time series into chunks
-        # 2. Assign each chunk to a different GPU
-        # 3. Process chunks in parallel using joblib
-        logger.debug(f"Starting parallel prediction on {len(train_tsdf.item_ids)} time series")
-        
+        # Generate predictions - this will use multiple GPUs internally
         pred: TimeSeriesDataFrame = self.tabpfn_predictor.predict(train_tsdf, test_tsdf)
         pred = pred.drop(columns=["target"])
 
@@ -190,7 +163,9 @@ class TabPFNTSPredictor:
 
     @staticmethod
     def handle_nan_values(tsdf: TimeSeriesDataFrame) -> TimeSeriesDataFrame:
-        """Handle NaN values in the TimeSeriesDataFrame"""
+        """
+        Handle NaN values in the TimeSeriesDataFrame
+        """
         processed_series = []
         ts_with_0_or_1_valid_value = []
         ts_with_nan = []
@@ -246,9 +221,10 @@ class TabPFNTSPredictor:
 
     @staticmethod
     def convert_to_timeseries_dataframe(test_data_input, use_covariates: bool = False):
-        """Convert test_data_input to TimeSeriesDataFrame"""
-        # Pre-allocate list with known size
-        time_series = [None] * len(test_data_input)
+        """
+        Convert test_data_input to TimeSeriesDataFrame - FIXED VERSION
+        """
+        time_series = []
 
         for i, item in enumerate(test_data_input):
             target = item["target"]
@@ -264,10 +240,13 @@ class TabPFNTSPredictor:
             df = pd.DataFrame({"target": target}, index=timestamp)
 
             # Create MultiIndex DataFrame
-            time_series[i] = df.set_index(
-                pd.MultiIndex.from_product(
-                    [[i], df.index], names=["item_id", "timestamp"]
-                )
+            df_with_multiindex = df.copy()
+            df_with_multiindex.index = pd.MultiIndex.from_product(
+                [[i], df.index], names=["item_id", "timestamp"]
             )
+            
+            time_series.append(df_with_multiindex)
 
-        #
+        # Concat and return as TimeSeriesDataFrame
+        combined_df = pd.concat(time_series)
+        return TimeSeriesDataFrame(combined_df)
