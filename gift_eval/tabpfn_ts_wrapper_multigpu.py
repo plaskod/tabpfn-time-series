@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Modified TabPFN-TS wrapper to properly enable native multi-GPU support
+Fixed TabPFN-TS wrapper with proper multi-GPU support
 """
 
 import os
@@ -29,9 +29,14 @@ from tabpfn_time_series.features import (
 logger = logging.getLogger(__name__)
 
 
-class TabPFNTSPredictorMultiGPU:
+class TabPFNTSPredictor:
     """
-    Enhanced TabPFN-TS Predictor with proper multi-GPU support
+    TabPFN-TS Predictor with automatic multi-GPU support using LOCAL mode
+    
+    When using TabPFNMode.LOCAL, the predictor automatically:
+    1. Detects the number of available GPUs
+    2. Sets num_workers = torch.cuda.device_count()
+    3. Distributes time series across GPUs for parallel processing
     """
     DEFAULT_FEATURES = [
         RunningIndexFeature(),
@@ -43,10 +48,10 @@ class TabPFNTSPredictorMultiGPU:
         self,
         ds_prediction_length: int,
         ds_freq: str,
-        tabpfn_mode: TabPFNMode = TabPFNMode.LOCAL,
+        tabpfn_mode: TabPFNMode = TabPFNMode.LOCAL,  # Use LOCAL for multi-GPU
         context_length: int = 4096,
         debug: bool = False,
-        num_workers: int = None,  # Add num_workers parameter
+        num_workers: int = None,  # For compatibility, but not used with LOCAL mode
         gpu_ids: list = None,      # Specify which GPUs to use
     ):
         self.ds_prediction_length = ds_prediction_length
@@ -54,56 +59,80 @@ class TabPFNTSPredictorMultiGPU:
         self.context_length = context_length
         self.debug = debug
         
-        # Configure GPU usage
+        # Configure GPU visibility BEFORE creating the predictor
         if gpu_ids is not None:
             # Set CUDA_VISIBLE_DEVICES to use specific GPUs
             os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpu_ids))
             logger.info(f"Set CUDA_VISIBLE_DEVICES to: {os.environ['CUDA_VISIBLE_DEVICES']}")
         
-        # Determine number of workers based on available GPUs
-        if num_workers is None:
-            num_workers = torch.cuda.device_count()
-            logger.info(f"Auto-detected {num_workers} GPUs for parallel processing")
+        # Check GPU availability
+        if tabpfn_mode == TabPFNMode.LOCAL and not torch.cuda.is_available():
+            raise ValueError("GPU is required for LOCAL TabPFN inference")
         
-        # Initialize TabPFN predictor with num_workers
+        # Log GPU configuration
+        if torch.cuda.is_available():
+            num_gpus = torch.cuda.device_count()
+            logger.info(f"CUDA Available: True")
+            logger.info(f"Number of visible GPUs: {num_gpus}")
+            logger.info(f"TabPFN will use {num_gpus} workers for parallel processing")
+            
+            for i in range(num_gpus):
+                logger.info(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
+        else:
+            logger.info(f"CUDA Available: False - using CLIENT mode")
+        
+        # Initialize TabPFN predictor
+        # When using LOCAL mode, it automatically sets num_workers = torch.cuda.device_count()
+        # Do NOT pass num_workers as it's not a valid parameter
         self.tabpfn_predictor = TabPFNTimeSeriesPredictor(
             tabpfn_mode=tabpfn_mode,
-            num_workers=num_workers,  # Pass num_workers to use multiple GPUs
         )
         
-        self.feature_transformer = FeatureTransformer(self.DEFAULT_FEATURES)
+        # Verify the configuration
+        if hasattr(self.tabpfn_predictor, 'worker'):
+            if hasattr(self.tabpfn_predictor.worker, 'num_workers'):
+                actual_workers = self.tabpfn_predictor.worker.num_workers
+                logger.info(f"TabPFN worker configured with {actual_workers} workers")
         
-        # Log configuration
-        logger.info(f"Initialized TabPFN-TS with {num_workers} workers")
-        logger.info(f"Available GPUs: {torch.cuda.device_count()}")
-        if torch.cuda.is_available():
-            for i in range(torch.cuda.device_count()):
-                logger.info(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
+        self.feature_transformer = FeatureTransformer(self.DEFAULT_FEATURES)
 
     def predict(self, test_data_input) -> Iterator[Forecast]:
-        logger.debug(f"len(test_data_input): {len(test_data_input)}")
+        logger.debug(f"Processing {len(test_data_input)} time series")
         
-        # Process in larger batches to better utilize multiple GPUs
-        # Increase batch size for multi-GPU processing
-        batch_size = min(1024 * torch.cuda.device_count(), len(test_data_input))
+        # Use larger batch size for multi-GPU processing
+        # This allows more time series to be distributed across GPUs
+        num_gpus = max(1, torch.cuda.device_count()) if torch.cuda.is_available() else 1
+        batch_size = min(1024 * num_gpus, len(test_data_input))
+        
+        logger.debug(f"Using batch size: {batch_size} for {num_gpus} GPUs")
         
         forecasts = []
-        for batch in batcher(test_data_input, batch_size=batch_size):
+        for batch_idx, batch in enumerate(batcher(test_data_input, batch_size=batch_size)):
+            logger.debug(f"Processing batch {batch_idx + 1}")
             forecasts.extend(self._predict_batch(batch))
 
         return forecasts
 
     def _predict_batch(self, test_data_input):
-        logger.debug(f"Processing batch of size: {len(test_data_input)}")
+        batch_size = len(test_data_input)
+        logger.debug(f"Processing batch of size: {batch_size}")
         
-        # Log which GPUs will be used
+        # Log expected GPU distribution
         if self.debug and torch.cuda.is_available():
-            logger.debug(f"Batch will be distributed across {torch.cuda.device_count()} GPUs")
+            num_gpus = torch.cuda.device_count()
+            per_gpu = batch_size // num_gpus if batch_size >= num_gpus else batch_size
+            logger.debug(f"Expected distribution: ~{per_gpu} time series per GPU across {num_gpus} GPUs")
 
         # Preprocess the input data
         train_tsdf, test_tsdf = self._preprocess_test_data(test_data_input)
 
-        # Generate predictions - this will use multiple GPUs internally
+        # Generate predictions
+        # The LocalTabPFN worker will automatically:
+        # 1. Shuffle and split time series into chunks
+        # 2. Assign each chunk to a different GPU
+        # 3. Process chunks in parallel using joblib
+        logger.debug(f"Starting parallel prediction on {len(train_tsdf.item_ids)} time series")
+        
         pred: TimeSeriesDataFrame = self.tabpfn_predictor.predict(train_tsdf, test_tsdf)
         pred = pred.drop(columns=["target"])
 
@@ -161,9 +190,7 @@ class TabPFNTSPredictorMultiGPU:
 
     @staticmethod
     def handle_nan_values(tsdf: TimeSeriesDataFrame) -> TimeSeriesDataFrame:
-        """
-        Handle NaN values in the TimeSeriesDataFrame
-        """
+        """Handle NaN values in the TimeSeriesDataFrame"""
         processed_series = []
         ts_with_0_or_1_valid_value = []
         ts_with_nan = []
@@ -219,9 +246,7 @@ class TabPFNTSPredictorMultiGPU:
 
     @staticmethod
     def convert_to_timeseries_dataframe(test_data_input, use_covariates: bool = False):
-        """
-        Convert test_data_input to TimeSeriesDataFrame
-        """
+        """Convert test_data_input to TimeSeriesDataFrame"""
         # Pre-allocate list with known size
         time_series = [None] * len(test_data_input)
 
@@ -245,5 +270,4 @@ class TabPFNTSPredictorMultiGPU:
                 )
             )
 
-        # Concat pre-allocated list
-        return TimeSeriesDataFrame(pd.concat(time_series))
+        #
