@@ -36,6 +36,7 @@ class TabPFNTSPredictor:
         ds_freq: str,
         tabpfn_mode: TabPFNMode = TabPFNMode.LOCAL,
         context_length: int = 4096,
+        batch_size: int = 1024,
         debug: bool = False,
     ):
         self.ds_prediction_length = ds_prediction_length
@@ -45,14 +46,15 @@ class TabPFNTSPredictor:
         )
         self.context_length = context_length
         self.debug = debug
+        self.batch_size = batch_size
 
         self.feature_transformer = FeatureTransformer(self.DEFAULT_FEATURES)
 
     def predict(self, test_data_input) -> Iterator[Forecast]:
-        logger.debug(f"len(test_data_input): {len(test_data_input)}")
+        logger.debug(f"len(test_data_input): {len(test_data_input)}, batch size: {self.batch_size}")
 
         forecasts = []
-        for batch in batcher(test_data_input, batch_size=1024):
+        for batch in batcher(test_data_input, batch_size=self.batch_size):
             forecasts.extend(self._predict_batch(batch))
 
         return forecasts

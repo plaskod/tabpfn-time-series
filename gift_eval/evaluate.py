@@ -264,8 +264,9 @@ def main(args):
             ds_freq=sub_dataset.freq,
             # tabpfn_mode=TabPFNMode.LOCAL,
             tabpfn_mode=TabPFNMode.LOCAL,
-            context_length=4096,
+            context_length=args.context_length,
             debug=args.debug,
+            batch_size=args.batch_size
         )
 
         res = evaluate_model(
@@ -313,7 +314,11 @@ if __name__ == "__main__":
         "--dataset_storage_path", type=str, default=str(Path(__file__).parent / "data")
     )
     parser.add_argument("--debug", action="store_true")
-
+    parser.add_argument(
+        "--context_length", type=int, default=4096)
+    parser.add_argument(
+        "--batch_size", type=int, default=1024)
+    
     # Wandb settings
     parser.add_argument("--wandb_project", type=str, default="tabpfn-ts-experiments")
     parser.add_argument(
