@@ -1,0 +1,2 @@
+dataset,model,eval_metrics/MSE[mean],eval_metrics/MSE[0.5],eval_metrics/MAE[0.5],eval_metrics/MASE[0.5],eval_metrics/MAPE[0.5],eval_metrics/sMAPE[0.5],eval_metrics/MSIS,eval_metrics/RMSE[mean],eval_metrics/NRMSE[mean],eval_metrics/ND[0.5],eval_metrics/mean_weighted_sum_quantile_loss,domain,num_variates
+hierarchical_sales/D/short,tabpfn-ts-3000cntx,30.846229556376603,30.846229556376603,2.372484998320587,0.7594134106996948,0.6430990817789141,1.0566583526977187,7.987672460691165,5.5539382024268695,1.7038867343492747,0.7278521237983361,0.5930294305159068,Sales,1
