@@ -1,0 +1,2 @@
+dataset,model,eval_metrics/MSE[mean],eval_metrics/MSE[0.5],eval_metrics/MAE[0.5],eval_metrics/MASE[0.5],eval_metrics/MAPE[0.5],eval_metrics/sMAPE[0.5],eval_metrics/MSIS,eval_metrics/RMSE[mean],eval_metrics/NRMSE[mean],eval_metrics/ND[0.5],eval_metrics/mean_weighted_sum_quantile_loss,domain,num_variates
+m_dense/D/short,tabpfn-ts-300cntx-run2,29985.49925925926,29985.49925925926,94.56601273148148,1.3008494574269172,0.20583477543405995,0.19771228931568288,8.40139363906797,173.1632156644686,0.29977114051010534,0.1637077561838447,0.1249343079580801,Transport,1
