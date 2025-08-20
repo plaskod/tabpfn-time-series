@@ -5,7 +5,7 @@
 set -euo pipefail
 
 # Visible GPUs and other fixed params
-GPUS="0,1,2"
+GPUS="0,1,2,3"
 BATCH_SIZE=2048
 PYTHON_BIN="python"
 MODEL_PREFIX="tabpfn-ts"
@@ -26,11 +26,12 @@ DATASETS=(
   bizitobs_l2c/H
 )
 
+# SEEDS=(0 42 45)
 # Context lengths to iterate over
-CONTEXT_LENGTHS=(100 200 300 500 1000 2000 3000)
+CONTEXT_LENGTHS=(100 200 300 500 1000 2000 3000 4096 5000)
 
 for CNTX in "${CONTEXT_LENGTHS[@]}"; do
-  MODEL_NAME="${MODEL_PREFIX}-${CNTX}cntx"
+  MODEL_NAME="${MODEL_PREFIX}-${CNTX}cntx-run4"
   for DS in "${DATASETS[@]}"; do
     echo "=== Running: dataset=${DS} | context_length=${CNTX} | model_name=${MODEL_NAME} ==="
     CUDA_VISIBLE_DEVICES="${GPUS}" \

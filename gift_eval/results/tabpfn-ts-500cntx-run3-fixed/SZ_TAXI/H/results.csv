@@ -1,0 +1,2 @@
+dataset,model,eval_metrics/MSE[mean],eval_metrics/MSE[0.5],eval_metrics/MAE[0.5],eval_metrics/MASE[0.5],eval_metrics/MAPE[0.5],eval_metrics/sMAPE[0.5],eval_metrics/MSIS,eval_metrics/RMSE[mean],eval_metrics/NRMSE[mean],eval_metrics/ND[0.5],eval_metrics/mean_weighted_sum_quantile_loss,domain,num_variates
+sz_taxi/H/short,tabpfn-ts-500cntx-run3-fixed,7.484377282297509,7.484377282297509,1.901077678060939,0.5790422921810412,1.4027195995689457,0.304076926321046,4.650035846354151,2.735758995653219,0.254852829410616,0.1770971148968154,0.14255717929029446,Transport,1

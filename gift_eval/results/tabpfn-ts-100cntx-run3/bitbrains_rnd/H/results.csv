@@ -1,0 +1,2 @@
+dataset,model,eval_metrics/MSE[mean],eval_metrics/MSE[0.5],eval_metrics/MAE[0.5],eval_metrics/MASE[0.5],eval_metrics/MAPE[0.5],eval_metrics/sMAPE[0.5],eval_metrics/MSIS,eval_metrics/RMSE[mean],eval_metrics/NRMSE[mean],eval_metrics/ND[0.5],eval_metrics/mean_weighted_sum_quantile_loss,domain,num_variates
+bitbrains_rnd/H/short,tabpfn-ts-100cntx-run3,3211625.6852818686,3211625.6852818686,234.31765459941562,5.960359201831186,4.081313421439533,0.4786319159556042,506.8774745327952,1792.1009138109016,7.843110417319668,1.0254887007688378,0.837870956964697,Web/CloudOps,2
