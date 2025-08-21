@@ -23,7 +23,11 @@ class TabPFNTimeSeriesPredictor:
         self,
         tabpfn_mode: TabPFNMode = TabPFNMode.CLIENT,
         config: dict = TABPFN_TS_DEFAULT_CONFIG,
+        retrieval_augmentation: str = "none",
+        num_retrieved_subsequences: int = 1,
     ) -> None:
+        self.retrieval_augmentation = retrieval_augmentation
+        self.num_retrieved_subsequences = num_retrieved_subsequences
         worker_mapping = {
             TabPFNMode.CLIENT: lambda: TabPFNClient(config),
             TabPFNMode.LOCAL: lambda: LocalTabPFN(config),

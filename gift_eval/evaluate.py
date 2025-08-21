@@ -258,15 +258,19 @@ def main(args):
         logger.info(f"Dataset term: {dataset_metadata['term']}")
         logger.info(f"Dataset prediction length: {sub_dataset.prediction_length}")
         logger.info(f"Dataset target dim: {sub_dataset.target_dim}")
+        logger.info(f"Dataset season length: {dataset_metadata['season_length']}")
 
         tabpfn_predictor = TabPFNTSPredictor(
             ds_prediction_length=sub_dataset.prediction_length,
             ds_freq=sub_dataset.freq,
+            ds_season_length=dataset_metadata['season_length'],
             # tabpfn_mode=TabPFNMode.LOCAL,
             tabpfn_mode=TabPFNMode.LOCAL,
             context_length=args.context_length,
             debug=args.debug,
-            batch_size=args.batch_size
+            batch_size=args.batch_size,
+            retrieval_augmentation=args.retrieval_augmentation,
+            num_retrieved_subsequences=args.num_retrieved_subsequences
         )
 
         res = evaluate_model(
@@ -324,7 +328,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--wandb_tags", type=str, default=""
     )  # model_name will be added later anyway
-
+    parser.add_argument(
+        "--retrieval_augmentation",
+        type=str,
+        default="none",
+        choices=["none", "random"],
+    )
+    parser.add_argument()
     args = parser.parse_args()
     args.dataset_storage_path = Path(args.dataset_storage_path)
     args.output_dir = Path(args.output_dir)
