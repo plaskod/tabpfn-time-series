@@ -186,7 +186,7 @@ class LocalTabPFN(TabPFNWorker):
         #   since the time series are of different lengths, we shuffle
         #   the item_ids s.t. the workload is distributed evenly across GPUs
         # Also, using 'min' since num_workers could be larger than the number of time series
-        np.random.seed(0)
+        np.random.seed(45)
         item_ids_chunks = np.array_split(
             np.random.permutation(train_tsdf.item_ids),
             min(total_num_workers, len(train_tsdf.item_ids)),

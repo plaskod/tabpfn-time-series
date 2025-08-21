@@ -65,6 +65,10 @@ class TabPFNTSPredictor:
         # Preprocess the input data
         train_tsdf, test_tsdf = self._preprocess_test_data(test_data_input)
 
+        # TODO: for fixed context length retrieve chunks from 'larger train' here
+        # TODO 1: check last and first timestamp 
+        # overlap of 'train' vs 'local test' that gets split into context and test query
+
         # Generate predictions
         pred: TimeSeriesDataFrame = self.tabpfn_predictor.predict(train_tsdf, test_tsdf)
         pred = pred.drop(columns=["target"])
