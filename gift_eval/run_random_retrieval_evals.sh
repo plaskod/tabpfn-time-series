@@ -129,7 +129,7 @@ for DS in "${DATASETS[@]}"; do
           --terms "${TERM}" \
           --batch_size "${BATCH_SIZE}" \
           --context_length "${CTX}" \
-          --debug \
+          # --debug \
           --few_shot_k "${K}" \
           --model_name "${MODEL_NAME}"
       echo

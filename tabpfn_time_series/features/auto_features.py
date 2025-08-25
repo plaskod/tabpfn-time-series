@@ -33,6 +33,7 @@ class AutoSeasonalFeature(FeatureGenerator):
         magnitude_threshold: Optional[float] = 0.05
         relative_threshold: bool = True
         exclude_zero: bool = True
+        verbose: bool = False
 
     def __init__(self, config: Optional[dict] = None):
         # Create default config from Config class
@@ -77,12 +78,15 @@ class AutoSeasonalFeature(FeatureGenerator):
         df = df.copy()
 
         # Detect seasonal periods from target data
-        detected_periods_and_magnitudes = self.find_seasonal_periods(
-            df.target, **self.config
-        )
-        logger.debug(
-            f"Found {len(detected_periods_and_magnitudes)} seasonal periods: {detected_periods_and_magnitudes}"
-        )
+        _cfg = self.config.copy()
+        _cfg.pop("verbose", None)  # not a find_seasonal_periods kwarg
+        detected_periods_and_magnitudes = self.find_seasonal_periods(df.target, **_cfg)
+        if self.config.get("verbose", False):
+            logger.debug(
+                "Found %d seasonal periods: %s",
+                len(detected_periods_and_magnitudes),
+                detected_periods_and_magnitudes,
+            )
 
         # Extract just the periods (without magnitudes)
         periods = [period for period, _ in detected_periods_and_magnitudes]
