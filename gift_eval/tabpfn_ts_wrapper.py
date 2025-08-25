@@ -139,8 +139,11 @@ class TabPFNTSPredictor:
 
                 num_samples = min(self.few_shot_k, max_start)
                 starts = rng.choice(max_start, size=num_samples, replace=False)
+                seg_counter = 1
                 for s in starts:
-                    window_df = full_item_df.iloc[s : s + self.few_shot_len]
+                    window_df = full_item_df.iloc[s : s + self.few_shot_len].copy()
+                    window_df["segment_id"] = seg_counter
+                    seg_counter += 1
                     support_segments.append(window_df)
 
             if support_segments:
@@ -151,9 +154,25 @@ class TabPFNTSPredictor:
         test_tsdf = generate_test_X(
             train_tsdf, prediction_length=self.ds_prediction_length, freq=self.ds_freq
         )
+        
+        # Assign segment_id to baseline context+test (segment 0), and fill any missing
+        train_tsdf = train_tsdf.copy()
+        if "segment_id" in train_tsdf.columns:
+            train_tsdf["segment_id"] = train_tsdf["segment_id"].fillna(0)
+        else:
+            train_tsdf["segment_id"] = 0
+        test_tsdf = test_tsdf.copy()
+        test_tsdf["segment_id"] = 0
+
         train_tsdf, test_tsdf = self.feature_transformer.transform(
             train_tsdf, test_tsdf
         )
+
+        # Drop segment_id from features to avoid leaking segment identity to the model
+        if "segment_id" in train_tsdf.columns:
+            train_tsdf = train_tsdf.drop(columns=["segment_id"])  # type: ignore
+        if "segment_id" in test_tsdf.columns:
+            test_tsdf = test_tsdf.drop(columns=["segment_id"])  # type: ignore
 
         return train_tsdf, test_tsdf
 

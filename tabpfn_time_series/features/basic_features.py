@@ -12,7 +12,17 @@ from tabpfn_time_series.features.feature_generator_base import (
 class RunningIndexFeature(FeatureGenerator):
     def generate(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
-        df["running_index"] = range(len(df))
+        if "segment_id" in df.columns:
+            # Reset running index within each segment independently
+            running = df.groupby(
+                [df.index.get_level_values("item_id"), "segment_id"]
+            ).cumcount()
+            # Replace any NA (shouldn't happen, but guard) with 0 before cast
+            running = running.fillna(0)
+            # Preserve an integer dtype to match baseline
+            df["running_index"] = running.astype(np.int64)
+        else:
+            df["running_index"] = np.arange(len(df), dtype=np.int64)
         return df
 
 

@@ -204,4 +204,19 @@ print("  predictions are for exactly the same test timestamps as baseline.")
 # Tip: You can also visualize the target + features using matplotlib if desired.
 # For clarity in this debug file we print shapes and small slices.
 
+train_base.loc[0].tail()
+# %% 
+test_base.loc[0].head()
 
+# %%
+
+
+train_fs.loc[0].tail()
+
+# %%
+test_fs.loc[0].head()
+# %%
+test_base.loc[16].tail()
+
+# %%
+test_fs.loc[16].tail()
