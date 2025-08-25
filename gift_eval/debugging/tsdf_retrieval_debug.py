@@ -76,15 +76,10 @@ print(f"test_data_input size: {len(test_data_input)}")
 # Helper: build the original (full) TimeSeriesDataFrame as seen by the wrapper
 
 # %%
-section("Step 3: Build full TimeSeriesDataFrame from the larger training split")
-# Prefer the larger training split (GluonTS TrainingDataset) for constructing the full TSDF
-train_entries: List[Dict[str, Any]] = ds.training_dataset
-train_dicts: List[Dict[str, Any]] = [
-    {"target": e["target"], "start": e["start"], "freq": ds.freq} for e in train_entries
-]
-full_tsdf = TabPFNTSPredictor.convert_to_timeseries_dataframe(train_dicts)
-print("Full TSDF: rows=", len(full_tsdf), "items=", len(full_tsdf.item_ids))
-print("Full TSDF head:\n", full_tsdf.head())
+section("Step 3: Build train_tsdf_full from test_data_input (exactly like the predictor)")
+train_tsdf_full = TabPFNTSPredictor.convert_to_timeseries_dataframe(test_data_input)
+print("train_tsdf_full: rows=", len(train_tsdf_full), "items=", len(train_tsdf_full.item_ids))
+print("train_tsdf_full head:\n", train_tsdf_full.head())
 
 
 # %% [markdown]
@@ -196,6 +191,13 @@ fs_item = train_fs.loc[sample_item]
 print("Sample item:", sample_item)
 print("Base item rows:", len(base_item), "FS item rows:", len(fs_item))
 print("FS-only rows head:\n", fs_item.loc[~fs_item.index.isin(base_item.index)].head())
+
+
+section("Step 8: What the predictor sees on each split")
+print("Short summary per window:")
+print("- Baseline inference: for each item_id, context = last CONTEXT_LENGTH rows of train_tsdf_full; test = next prediction_length timestamps.")
+print("- Retrieval inference: same context + appended top-k random subsequences from earlier history (per item), features applied to combined table;")
+print("  predictions are for exactly the same test timestamps as baseline.")
 
 
 # %% [markdown]

@@ -8,12 +8,14 @@ from tabpfn_time_series.ts_dataframe import TimeSeriesDataFrame
 def generate_test_X(
     train_tsdf: TimeSeriesDataFrame,
     prediction_length: int,
+    freq: str | None = None,
 ):
     test_dfs = []
     for item_id in train_tsdf.item_ids:
         last_train_timestamp = train_tsdf.xs(item_id, level="item_id").index.max()
+        use_freq = freq if freq is not None else train_tsdf.freq
         first_test_timestamp = pd.date_range(
-            start=last_train_timestamp, periods=2, freq=train_tsdf.freq
+            start=last_train_timestamp, periods=2, freq=use_freq
         )[-1]
         test_dfs.append(
             pd.DataFrame(
@@ -22,7 +24,7 @@ def generate_test_X(
                     "timestamp": pd.date_range(
                         start=first_test_timestamp,
                         periods=prediction_length,
-                        freq=train_tsdf.freq,
+                        freq=use_freq,
                     ),
                     "item_id": item_id,
                 }

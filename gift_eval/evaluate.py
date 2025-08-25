@@ -266,7 +266,10 @@ def main(args):
             tabpfn_mode=TabPFNMode.LOCAL,
             context_length=args.context_length,
             debug=args.debug,
-            batch_size=args.batch_size
+            batch_size=args.batch_size,
+            few_shot_k=args.few_shot_k,
+            few_shot_len=args.few_shot_len,
+            few_shot_seed=args.few_shot_seed,
         )
 
         res = evaluate_model(
@@ -318,6 +321,15 @@ if __name__ == "__main__":
         "--context_length", type=int, default=4096)
     parser.add_argument(
         "--batch_size", type=int, default=1024)
+    parser.add_argument(
+        "--few_shot_k", type=int, default=0,
+    )
+    parser.add_argument(
+        "--few_shot_len", type=int, default=0,
+    )
+    parser.add_argument(
+        "--few_shot_seed", type=int, default=42,
+    )
     
     # Wandb settings
     parser.add_argument("--wandb_project", type=str, default="tabpfn-ts-experiments")

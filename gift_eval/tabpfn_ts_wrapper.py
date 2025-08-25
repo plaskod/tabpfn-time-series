@@ -38,6 +38,9 @@ class TabPFNTSPredictor:
         context_length: int = 4096,
         batch_size: int = 1024,
         debug: bool = False,
+        few_shot_k: int = 0,
+        few_shot_len: int = 0,
+        few_shot_seed: int = 42,
     ):
         self.ds_prediction_length = ds_prediction_length
         self.ds_freq = ds_freq
@@ -47,6 +50,9 @@ class TabPFNTSPredictor:
         self.context_length = context_length
         self.debug = debug
         self.batch_size = batch_size
+        self.few_shot_k = max(0, few_shot_k)
+        self.few_shot_len = max(0, few_shot_len)
+        self.few_shot_seed = few_shot_seed
 
         self.feature_transformer = FeatureTransformer(self.DEFAULT_FEATURES)
 
@@ -100,24 +106,50 @@ class TabPFNTSPredictor:
         - Generate test data and apply feature transformations
         """
         # Convert input to TimeSeriesDataFrame
-        train_tsdf = self.convert_to_timeseries_dataframe(test_data_input)
+        train_tsdf_full = self.convert_to_timeseries_dataframe(test_data_input)
 
         # Handle NaN values
-        train_tsdf = self.handle_nan_values(train_tsdf)
+        train_tsdf_full = self.handle_nan_values(train_tsdf_full)
 
         # Assert no more NaN in train_tsdf target
-        assert not train_tsdf.target.isnull().any()
+        assert not train_tsdf_full.target.isnull().any()
 
         # Slice if needed
         if self.context_length > 0:
             logger.info(
                 f"Slicing train_tsdf to {self.context_length} timesteps for each time series"
             )
-            train_tsdf = train_tsdf.slice_by_timestep(-self.context_length, None)
+            train_tsdf = train_tsdf_full.slice_by_timestep(-self.context_length, None)
+        else:
+            train_tsdf = train_tsdf_full
+
+        # Few-shot augmentation: sample random subsequences from the earlier (larger) training split
+        if self.few_shot_k > 0 and self.few_shot_len > 0:
+            rng = np.random.default_rng(self.few_shot_seed)
+            support_segments = []
+
+            for item_id, full_item_df in train_tsdf_full.groupby(level="item_id", sort=False):
+                # Determine range to sample from: exclude the most recent context region
+                full_item_df = full_item_df.copy()
+                full_len = len(full_item_df)
+                exclude_recent = max(0, self.context_length)
+                max_start = full_len - exclude_recent - self.few_shot_len
+                if max_start <= 0:
+                    continue
+
+                num_samples = min(self.few_shot_k, max_start)
+                starts = rng.choice(max_start, size=num_samples, replace=False)
+                for s in starts:
+                    window_df = full_item_df.iloc[s : s + self.few_shot_len]
+                    support_segments.append(window_df)
+
+            if support_segments:
+                support_tsdf = TimeSeriesDataFrame(pd.concat(support_segments))
+                train_tsdf = TimeSeriesDataFrame(pd.concat([train_tsdf, support_tsdf]).sort_index())
 
         # Generate test data and features
         test_tsdf = generate_test_X(
-            train_tsdf, prediction_length=self.ds_prediction_length
+            train_tsdf, prediction_length=self.ds_prediction_length, freq=self.ds_freq
         )
         train_tsdf, test_tsdf = self.feature_transformer.transform(
             train_tsdf, test_tsdf
