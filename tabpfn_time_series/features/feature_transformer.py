@@ -24,8 +24,15 @@ class FeatureTransformer:
         tsdf = pd.concat([train_tsdf, test_tsdf])
 
         # Apply all feature generators
+        # If segment_id is present, isolate features per (item_id, segment_id)
         for generator in self.feature_generators:
-            tsdf = tsdf.groupby(level="item_id", group_keys=False).apply(generator)
+            if "segment_id" in tsdf.columns:
+                tsdf = (
+                    tsdf.groupby([pd.Grouper(level="item_id"), "segment_id"], group_keys=False)
+                    .apply(generator)
+                )
+            else:
+                tsdf = tsdf.groupby(level="item_id", group_keys=False).apply(generator)
 
         # Split train and test tsdf
         train_tsdf = tsdf.iloc[: len(train_tsdf)]
