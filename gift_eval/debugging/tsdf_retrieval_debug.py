@@ -154,7 +154,7 @@ print({
 per_item_base = train_base.groupby(level="item_id").size()
 per_item_fs = train_fs.groupby(level="item_id").size()
 delta_per_item = (per_item_fs - per_item_base).sort_values(ascending=False)
-print("Per-item added rows (top 10):\n", delta_per_item.head(10))
+print("Per-item added rows head::\n", delta_per_item.head(10))
 
 
 # %% [markdown]
