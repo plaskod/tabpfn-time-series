@@ -51,7 +51,10 @@ class TabPFNTSPredictor:
         self.debug = debug
         self.batch_size = batch_size
         self.few_shot_k = max(0, few_shot_k)
-        self.few_shot_len = max(0, few_shot_len)
+        # If not specified, default retrieval window to context_length + prediction_length
+        self.few_shot_len = (
+            few_shot_len if few_shot_len > 0 else (context_length + ds_prediction_length)
+        )
         self.few_shot_seed = few_shot_seed
 
         self.feature_transformer = FeatureTransformer(self.DEFAULT_FEATURES)
@@ -127,18 +130,38 @@ class TabPFNTSPredictor:
         if self.few_shot_k > 0 and self.few_shot_len > 0:
             rng = np.random.default_rng(self.few_shot_seed)
             support_segments = []
+            base_rows = len(train_tsdf)
 
             for item_id, full_item_df in train_tsdf_full.groupby(level="item_id", sort=False):
                 # Determine range to sample from: exclude the most recent context region
+                # and constrain to be within (few_shot_len + prediction_length) from the context cutoff.
                 full_item_df = full_item_df.copy()
                 full_len = len(full_item_df)
                 exclude_recent = max(0, self.context_length)
-                max_start = full_len - exclude_recent - self.few_shot_len
-                if max_start <= 0:
+
+                start_of_context = full_len - exclude_recent
+                if start_of_context <= 0:
                     continue
 
-                num_samples = min(self.few_shot_k, max_start)
-                starts = rng.choice(max_start, size=num_samples, replace=False)
+                # Allowed end index window (inclusive):
+                #   earliest_end = start_of_context - (few_shot_len + prediction_length)
+                #   latest_end   = start_of_context - 1
+                earliest_end = max(0, start_of_context - (self.few_shot_len + self.ds_prediction_length))
+                latest_end = start_of_context - 1
+
+                # Convert to allowed start range (inclusive):
+                # start ∈ [earliest_end - (L-1), latest_end - (L-1)]
+                start_low = max(0, earliest_end - (self.few_shot_len - 1))
+                start_high = latest_end - (self.few_shot_len - 1)
+
+                if start_high < start_low:
+                    continue
+
+                # Build candidate starts and sample
+                # Keep overhead low by using range bounds directly in choice
+                num_candidates = start_high - start_low + 1
+                num_samples = min(self.few_shot_k, num_candidates)
+                starts = start_low + rng.choice(num_candidates, size=num_samples, replace=False)
                 seg_counter = 1
                 for s in starts:
                     window_df = full_item_df.iloc[s : s + self.few_shot_len].copy()
@@ -149,6 +172,24 @@ class TabPFNTSPredictor:
             if support_segments:
                 support_tsdf = TimeSeriesDataFrame(pd.concat(support_segments))
                 train_tsdf = TimeSeriesDataFrame(pd.concat([train_tsdf, support_tsdf]).sort_index())
+                appended_rows = len(train_tsdf) - base_rows
+                logger.info(
+                    "Retrieval appended rows: %d | top_k=%d | few_shot_len=%d | context_length=%d | prediction_length=%d",
+                    appended_rows,
+                    self.few_shot_k,
+                    self.few_shot_len,
+                    self.context_length,
+                    self.ds_prediction_length,
+                )
+            else:
+                logger.info(
+                    "Retrieval appended rows: %d | top_k=%d | few_shot_len=%d | context_length=%d | prediction_length=%d",
+                    0,
+                    self.few_shot_k,
+                    self.few_shot_len,
+                    self.context_length,
+                    self.ds_prediction_length,
+                )
 
         # Generate test data and features
         test_tsdf = generate_test_X(
