@@ -423,7 +423,7 @@ def plot_short_term_wql_vs_comparable_context(df: pd.DataFrame, output_dir: Path
 
         title_freq = f"/{freq}" if isinstance(freq, str) and len(str(freq)) > 0 and str(freq) != "None" else ""
         plt.title(f"Short term WQL vs Context Len: {dataset_name}{title_freq}")
-        plt.xlabel("context_len (tail) / effective_context_len (retrieval)")
+        plt.xlabel("Context")
         plt.ylabel("WQL (mean weighted sum quantile loss)")
         plt.grid(True, alpha=0.3)
         plt.legend()
