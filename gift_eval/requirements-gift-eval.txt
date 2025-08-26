@@ -5,3 +5,5 @@ datasets==3.2.0
 
 huggingface_hub[cli]
 jupyter
+chromadb>=0.5.0
+momentfm>=0.1.6
