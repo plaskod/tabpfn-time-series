@@ -38,7 +38,8 @@ class TabPFNWorker(ABC):
                 train_tsdf.loc[item_id],
                 test_tsdf.loc[item_id],
             )
-            for item_id in tqdm(train_tsdf.item_ids, desc="Predicting time series")
+            # Predict strictly for series present in test, so support-only segments in train are ignored
+            for item_id in tqdm(test_tsdf.item_ids, desc="Predicting time series")
         )
 
         predictions = pd.concat(predictions)

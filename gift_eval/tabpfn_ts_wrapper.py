@@ -186,7 +186,7 @@ class TabPFNTSPredictor:
                     train_tsdf=train_tsdf, train_tsdf_full=train_tsdf_full
                 )
 
-        # Generate test data and features
+        # Generate test data and features for all items in train_tsdf
         test_tsdf = generate_test_X(
             train_tsdf, prediction_length=self.ds_prediction_length, freq=self.ds_freq
         )
@@ -207,15 +207,18 @@ class TabPFNTSPredictor:
         # Log baseline context and horizon boundaries (segment 0)
         if self.debug:
             for item_id, item_df in train_tsdf.groupby(level="item_id", sort=False):
-                seg0 = item_df  # segment_id already dropped later; infer from time ordering
+                # Skip support-only segments that are not present in test
+                try:
+                    hor = test_tsdf.loc[item_id]
+                except KeyError:
+                    continue
                 # context = last context_length rows of pre-feature train_tsdf_full per item
-                # approximate via last context_length of item_df where available
                 ctx_len = min(self.context_length, len(item_df))
                 ctx_slice = item_df.iloc[-ctx_len:]
                 ctx_start = ctx_slice.index.get_level_values("timestamp")[0]
                 ctx_end = ctx_slice.index.get_level_values("timestamp")[-1]
-                hor_start = test_tsdf.loc[item_id].index.get_level_values("timestamp")[0]
-                hor_end = test_tsdf.loc[item_id].index.get_level_values("timestamp")[-1]
+                hor_start = hor.index.get_level_values("timestamp")[0]
+                hor_end = hor.index.get_level_values("timestamp")[-1]
                 logger.info(
                     "baseline item_id=%s | ctx_start=%s ctx_end=%s | hor_start=%s hor_end=%s",
                     str(item_id), str(ctx_start), str(ctx_end), str(hor_start), str(hor_end)
@@ -299,6 +302,7 @@ class TabPFNTSPredictor:
 
         if support_segments:
             support_tsdf = TimeSeriesDataFrame(pd.concat(support_segments))
+            # Keep original item_id dtype; segment_id will separate features logically
             train_tsdf = TimeSeriesDataFrame(pd.concat([train_tsdf, support_tsdf]).sort_index())
             appended_rows = len(train_tsdf) - base_rows
             logger.info(
@@ -471,6 +475,7 @@ class TabPFNTSPredictor:
 
         if support_segments:
             support_tsdf = TimeSeriesDataFrame(pd.concat(support_segments))
+            # Keep original item_id dtype; segment_id will separate features logically
             train_tsdf = TimeSeriesDataFrame(pd.concat([train_tsdf, support_tsdf]).sort_index())
             appended_rows = len(train_tsdf) - base_rows
             logger.info(

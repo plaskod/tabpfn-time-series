@@ -10,6 +10,8 @@ def generate_test_X(
     prediction_length: int,
     freq: str | None = None,
 ):
+    # Ensure test item_id dtype matches train item_id dtype to avoid equality assertion failures
+    train_item_dtype = train_tsdf.index.levels[0].dtype
     test_dfs = []
     for item_id in train_tsdf.item_ids:
         last_train_timestamp = train_tsdf.xs(item_id, level="item_id").index.max()
@@ -31,8 +33,21 @@ def generate_test_X(
             )
         )
 
-    test_tsdf = TimeSeriesDataFrame.from_data_frame(pd.concat(test_dfs))
-    assert test_tsdf.item_ids.equals(train_tsdf.item_ids)
+    test_df = pd.concat(test_dfs)
+    # Coerce item_id column dtype to match train index dtype
+    try:
+        test_df["item_id"] = test_df["item_id"].astype(train_item_dtype)
+    except Exception:
+        # Fallback to string to preserve comparability if extension dtype astype fails
+        test_df["item_id"] = test_df["item_id"].astype(str)
+        # Also coerce train index for equality check later
+        coerce_train_ids = pd.Index(train_tsdf.item_ids.astype(str))
+    else:
+        coerce_train_ids = train_tsdf.item_ids
+
+    test_tsdf = TimeSeriesDataFrame.from_data_frame(test_df)
+    # Compare values irrespective of dtype differences
+    assert pd.Index(test_tsdf.item_ids.astype(str)).equals(pd.Index(coerce_train_ids.astype(str)))
 
     return test_tsdf
 
