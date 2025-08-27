@@ -58,6 +58,10 @@ class TabPFNTSPredictor:
         moment_progress: bool = False,
         moment_local_files_only: bool = False,
         retrieval_scope: str = "per_item",  # or "global"
+        retrieval_separation_len: int = 0,  # min gap (in timesteps) between retrieved windows
+        retrieval_oversample_factor: int = 10,  # multiplier for n_results when querying Chroma
+        index_tail_trim_multiple: int = 3,  # trim last N*prediction_length timestamps from train when indexing
+        index_step: int = 1,  # step size for sliding windows during indexing
     ):
         self.ds_prediction_length = ds_prediction_length
         self.ds_freq = ds_freq
@@ -90,6 +94,10 @@ class TabPFNTSPredictor:
         self.moment_progress = moment_progress
         self.moment_local_files_only = moment_local_files_only
         self.retrieval_scope = retrieval_scope
+        self.retrieval_separation_len = max(0, int(retrieval_separation_len))
+        self.retrieval_oversample_factor = max(1, int(retrieval_oversample_factor))
+        self.index_tail_trim_multiple = max(0, int(index_tail_trim_multiple))
+        self.index_step = max(1, int(index_step))
 
         # Lazy-loaded MOMENT pipeline and Chroma collection
         self._moment_pipeline = None  # type: ignore
@@ -262,7 +270,19 @@ class TabPFNTSPredictor:
             # Keep overhead low by using range bounds directly in choice
             num_candidates = start_high - start_low + 1
             num_samples = min(self.few_shot_k, num_candidates)
-            starts = start_low + rng.choice(num_candidates, size=num_samples, replace=False)
+            candidate_starts = start_low + rng.choice(num_candidates, size=num_samples * 3, replace=False)
+            # Enforce separation in index units (few_shot_len + separation_len)
+            min_delta = self.few_shot_len + self.retrieval_separation_len
+            starts_sorted = np.sort(candidate_starts)
+            starts = []
+            for s in starts_sorted:
+                if not starts:
+                    starts.append(s)
+                else:
+                    if all(abs(int(s) - int(prev)) >= min_delta for prev in starts):
+                        starts.append(s)
+                if len(starts) >= num_samples:
+                    break
             seg_counter = 1
             for s in starts:
                 window_df = full_item_df.iloc[s : s + self.few_shot_len].copy()
@@ -336,8 +356,8 @@ class TabPFNTSPredictor:
         query_segments: List[pd.DataFrame] = []
         self._last_retrieval_info = {}
         for item_id, item_df in train_tsdf.groupby(level="item_id", sort=False):
-            # Query is the last moment_ctx_len of current context region
-            ctx_slice = item_df.iloc[-min(self.moment_ctx_len, len(item_df)) :].copy()
+            # Query embedding based on base_initial_context = last prediction_length steps
+            ctx_slice = item_df.iloc[-min(self.ds_prediction_length, len(item_df)) :].copy()
             ctx_slice["segment_id"] = 0
             query_segments.append(ctx_slice)
             self._last_retrieval_info[str(item_id)] = []
@@ -365,57 +385,89 @@ class TabPFNTSPredictor:
         support_segments: List[pd.DataFrame] = []
         base_rows = len(train_tsdf)
         for i, q_id in enumerate(q_ids):
-            # Build Chroma filter with a single top-level operator
-            conds: List[Dict[str, object]] = []
-            if self.retrieval_scope == "per_item":
-                conds.append({"item_id": {"$eq": q_meta[i]["item_id"]}})
-            conds.append({"end_ts_int": {"$lt": q_meta[i]["q_start_ts_int"]}})
-            where: Dict[str, object]
-            if len(conds) == 1:
-                # single condition still needs an operator wrapper
-                where = {"$and": conds}
-            else:
-                where = {"$and": conds}
+            # Helper to build where filter
+            def build_where(scope_item: Optional[str]) -> Dict[str, object]:
+                conds: List[Dict[str, object]] = []
+                if scope_item is not None:
+                    conds.append({"item_id": {"$eq": scope_item}})
+                conds.append({"end_ts_int": {"$lt": q_meta[i]["q_start_ts_int"]}})
+                if len(conds) == 1:
+                    return conds[0]
+                return {"$and": conds}
 
-            result = self._chroma_collection.query(
-                query_embeddings=[q_vecs[i]],
-                n_results=self.few_shot_k,
-                where=where,
-                include=["metadatas", "distances"],
-            )
+            # Try passes to ensure exactly few_shot_k:
+            # 1) per-item + spacing, 2) per-item + no spacing,
+            # 3) global + spacing, 4) global + no spacing
+            scopes: List[Optional[str]] = [q_meta[i]["item_id"], q_meta[i]["item_id"], None, None]
+            spacings: List[bool] = [self.retrieval_separation_len > 0, False, self.retrieval_separation_len > 0, False]
 
-            ids = result.get("ids", [[]])[0]
-            metas = result.get("metadatas", [[]])[0]
-            dists = result.get("distances", [[]])[0]
+            kept_starts: List[int] = []
+            kept_j = 0
+            step_ns = pd.tseries.frequencies.to_offset(self.ds_freq).nanos
+            gap_ns = int(self.retrieval_separation_len) * step_ns
+            win_ns = int(self.ds_prediction_length) * step_ns
 
-            if self.debug:
-                logger.info("MOMENT retrieval item=%s top_k=%d", q_meta[i]["item_id"], len(ids))
-                for j, mid in enumerate(ids):
-                    logger.info("  #%d id=%s dist=%.4f meta=%s", j + 1, str(mid), float(dists[j]), metas[j])
-
-            # Reconstruct windows from metadata
-            for j, md in enumerate(metas):
-                iid = int(md["item_id"]) if str(md["item_id"]).isdigit() else md["item_id"]
-                st = pd.Timestamp(md["start_ts"])
-                en = pd.Timestamp(md["end_ts"])
-                full_df = train_tsdf_full.loc[iid]
-                window_df = full_df.loc[st:en, :].copy()
-                # Restore MultiIndex [item_id, timestamp] expected by TimeSeriesDataFrame
-                if not isinstance(window_df.index, pd.MultiIndex):
-                    window_df.index = pd.MultiIndex.from_product(
-                        [[iid], window_df.index], names=["item_id", "timestamp"]
+            for scope_item, do_spacing in zip(scopes, spacings):
+                if kept_j >= self.few_shot_k:
+                    break
+                where = build_where(scope_item)
+                # Dynamically grow n_results until filled or cap
+                n = max(self.few_shot_k, 10)
+                cap = 5000
+                while kept_j < self.few_shot_k and n <= cap:
+                    result = self._chroma_collection.query(
+                        query_embeddings=[q_vecs[i]],
+                        n_results=n,
+                        where=where,
+                        include=["metadatas", "distances"],
                     )
-                window_df["segment_id"] = j + 1
-                support_segments.append(window_df)
-                # Track retrieval info for debugging/plotting
-                self._last_retrieval_info.setdefault(str(q_meta[i]["item_id"]), []).append(
-                    {
-                        "item_id": str(iid),
-                        "start_ts": str(st),
-                        "end_ts": str(en),
-                        "distance": float(dists[j]) if j < len(dists) else None,
-                    }
-                )
+                    metas = result.get("metadatas", [[]])[0]
+                    dists = result.get("distances", [[]])[0]
+                    if self.debug:
+                        logger.info(
+                            "MOMENT retrieval item=%s scope=%s spacing=%s n=%d returned=%d",
+                            q_meta[i]["item_id"],
+                            scope_item if scope_item is not None else "global",
+                            str(do_spacing),
+                            n,
+                            len(metas),
+                        )
+                    if not metas:
+                        break
+                    for j, md in enumerate(metas):
+                        if kept_j >= self.few_shot_k:
+                            break
+                        iid = int(md["item_id"]) if str(md["item_id"]).isdigit() else md["item_id"]
+                        st = pd.Timestamp(md["start_ts"])
+                        en = pd.Timestamp(md["end_ts"])
+                        st_int = int(pd.Timestamp(md["start_ts"]).value)
+                        # Spacing check
+                        if do_spacing and kept_starts:
+                            min_dist = min(abs(st_int - ks) for ks in kept_starts)
+                            if min_dist < (win_ns + gap_ns):
+                                continue
+                        full_df = train_tsdf_full.loc[iid]
+                        window_df = full_df.loc[st:en, :].copy()
+                        if not isinstance(window_df.index, pd.MultiIndex):
+                            window_df.index = pd.MultiIndex.from_product(
+                                [[iid], window_df.index], names=["item_id", "timestamp"]
+                            )
+                        if len(window_df) < self.ds_prediction_length:
+                            continue
+                        window_df = window_df.iloc[-self.ds_prediction_length :]
+                        kept_starts.append(st_int)
+                        kept_j += 1
+                        window_df["segment_id"] = kept_j
+                        support_segments.append(window_df)
+                        self._last_retrieval_info.setdefault(str(q_meta[i]["item_id"]), []).append(
+                            {
+                                "item_id": str(iid),
+                                "start_ts": str(st),
+                                "end_ts": str(en),
+                                "distance": float(dists[j]) if j < len(dists) else None,
+                            }
+                        )
+                    n = n + self.few_shot_k
 
         if support_segments:
             support_tsdf = TimeSeriesDataFrame(pd.concat(support_segments))
@@ -464,39 +516,47 @@ class TabPFNTSPredictor:
         to_upsert_ids: List[str] = []
         to_upsert_vecs: List[List[float]] = []
         to_upsert_metas: List[Dict] = []
+        to_upsert_slices: List[Tuple[object, int]] = []  # (item_id, start_idx)
+        arr_cache: Dict[object, np.ndarray] = {}
+        ts_cache: Dict[object, np.ndarray] = {}
 
         for item_id, full_item_df in train_tsdf_full.groupby(level="item_id", sort=False):
-            full_item_df = full_item_df.copy()
             full_len = len(full_item_df)
-            exclude_recent = max(0, self.context_length)
-            start_of_context = full_len - exclude_recent
-            if start_of_context <= 0:
+            win_len = int(self.ds_prediction_length)
+            if win_len <= 0 or full_len < win_len:
                 continue
 
-            earliest_end = max(0, start_of_context - (self.few_shot_len + self.ds_prediction_length))
-            latest_end = start_of_context - 1
-            start_low = max(0, earliest_end - (self.few_shot_len - 1))
-            start_high = latest_end - (self.few_shot_len - 1)
-            if start_high < start_low:
+            # Cache arrays for fast slicing
+            arr = full_item_df["target"].to_numpy(dtype=np.float32)
+            ts_idx = full_item_df.index.get_level_values("timestamp").to_numpy()
+            arr_cache[item_id] = arr
+            ts_cache[item_id] = ts_idx
+
+            # Trim tail to avoid leakage: remove last N*pred_len timestamps from indexing
+            trim = self.index_tail_trim_multiple * win_len
+            max_end_exclusive = max(0, full_len - trim)
+            end_limit = full_len if trim == 0 else max_end_exclusive
+            end_limit = max(end_limit, 0)
+            max_start = max(0, end_limit - win_len)
+            if max_start <= 0 and end_limit < win_len:
                 continue
 
-            # Iterate possible starting indices; to limit compute, only take non-overlapping step of stride=1
-            for s in range(start_low, start_high + 1):
-                sub_df = full_item_df.iloc[s : s + self.few_shot_len]
-                st_ts = sub_df.index.get_level_values("timestamp")[0]
-                en_ts = sub_df.index.get_level_values("timestamp")[-1]
-                uid = f"{self.dataset_id}::{str(item_id)}::{int(st_ts.value)}::{int(en_ts.value)}"
+            step = self.index_step
+            for s in range(0, max_start + 1, step):
+                st_ts = ts_idx[s]
+                en_ts = ts_idx[s + win_len - 1]
+                uid = f"{self.dataset_id}::{str(item_id)}::{int(pd.Timestamp(st_ts).value)}::{int(pd.Timestamp(en_ts).value)}"
                 to_upsert_ids.append(uid)
                 to_upsert_metas.append({
                     "dataset_id": self.dataset_id,
                     "item_id": str(item_id),
-                    "start_ts": str(st_ts),
-                    "end_ts": str(en_ts),
-                    "start_ts_int": int(st_ts.value),
-                    "end_ts_int": int(en_ts.value),
-                    "length": int(self.few_shot_len),
+                    "start_ts": str(pd.Timestamp(st_ts)),
+                    "end_ts": str(pd.Timestamp(en_ts)),
+                    "start_ts_int": int(pd.Timestamp(st_ts).value),
+                    "end_ts_int": int(pd.Timestamp(en_ts).value),
+                    "length": int(win_len),
                 })
-                # Collect vectors later in a batch to avoid recomputing if present
+                to_upsert_slices.append((item_id, s))
 
         if not to_upsert_ids:
             return
@@ -530,17 +590,15 @@ class TabPFNTSPredictor:
                 use_pbar = False
 
             values_list: List[np.ndarray] = []
-            indexed_item_ids: List[object] = []
-            indexed_stamps: List[pd.Index] = []
+            # Build a map from uid to start index for fast slicing
+            start_index_map: Dict[str, Tuple[object, int]] = {}
+            for (uid, md), (iid_slice, s_start) in zip(zip(to_upsert_ids, to_upsert_metas), to_upsert_slices):
+                start_index_map[uid] = (iid_slice, s_start)
+
             for uid, md in missing_pairs:
-                iid = int(md["item_id"]) if str(md["item_id"]).isdigit() else md["item_id"]
-                st = pd.Timestamp(md["start_ts"])
-                en = pd.Timestamp(md["end_ts"])
-                full_df = train_tsdf_full.loc[iid]
-                sub_df = full_df.loc[st:en, :]
-                values_list.append(sub_df.target.values.astype(np.float32))
-                indexed_item_ids.append(iid)
-                indexed_stamps.append(sub_df.index)
+                iid_slice, s_start = start_index_map[uid]
+                arr = arr_cache[iid_slice]
+                values_list.append(arr[s_start : s_start + win_len])
 
             # Batch forward
             total = len(values_list)
