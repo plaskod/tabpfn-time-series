@@ -34,7 +34,7 @@ DATASET_NAME = "bizitobs_service"  # or e.g. "hierarchical_sales/D", "LOOP_SEATT
 DATASET_STORAGE_PATH = REPO_ROOT / "gift_eval" / "data"
 TERM = "short"  # ["short", "medium", "long"]
 
-CONTEXT_LENGTH = 100
+CONTEXT_LENGTH = 60
 
 # Retrieval (few-shot) params
 FEW_SHOT_K = 10       # top_k MOMENT subsequences (0 disables retrieval)
