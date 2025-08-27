@@ -251,7 +251,7 @@ if len(train_mom.item_ids):
     y_base = base_item["target"].to_numpy()
 
     plt.figure(figsize=(14, 6))
-    plt.plot(ts_base, y_base, label=f"item {sample_item} (baseline context)", lw=2)
+    plt.plot(ts_base, y_base, label=f"item {sample_item} (baseline context) (len={len(ts_base)})", lw=2)
 
     # Overlay retrieved windows based on stored metadata
     item_key = str(sample_item)
@@ -264,7 +264,8 @@ if len(train_mom.item_ids):
             seg = full_df.loc[st:en, :]
             ts_seg = seg.index.get_level_values("timestamp").to_numpy()
             y_seg = seg["target"].to_numpy()
-            lbl = f"retrieved #{j+1} (d={md.get('distance', None)})"
+            seg_len = len(ts_seg)
+            lbl = f"retrieved #{j+1} (len={seg_len}, d={md.get('distance', None)})"
             plt.plot(ts_seg, y_seg, color=cmap((j + 1) % 10), alpha=0.9, label=lbl)
 
     plt.title("MOMENT cosine retrieval: baseline context + top-k windows")
@@ -344,3 +345,5 @@ else:
 #     main()
 
 
+
+# %%
