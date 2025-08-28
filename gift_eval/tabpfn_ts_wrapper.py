@@ -50,7 +50,7 @@ class TabPFNTSPredictor:
         dataset_id: Optional[str] = None,
         chroma_db_dir: Optional[Path] = None,
         moment_model_id: str = "AutonLab/MOMENT-1-large",
-        moment_ctx_len: int = 512,
+        moment_ctx_len: int = 0,
         moment_device: Optional[str] = None,
         moment_devices: Optional[Sequence[str]] = None,
         moment_batch_size: int = 64,
@@ -86,7 +86,8 @@ class TabPFNTSPredictor:
             Path(chroma_db_dir) if chroma_db_dir is not None else Path(__file__).parent / ".moment_chroma"
         )
         self.moment_model_id = moment_model_id
-        self.moment_ctx_len = int(moment_ctx_len)
+        # If moment_ctx_len <= 0, adopt dataset prediction_length (P)
+        self.moment_ctx_len = int(moment_ctx_len) if int(moment_ctx_len) > 0 else int(ds_prediction_length)
         self.moment_device = moment_device
         self.moment_devices = list(moment_devices) if moment_devices is not None else None
         self.moment_batch_size = int(moment_batch_size)
@@ -526,18 +527,34 @@ class TabPFNTSPredictor:
         return train_tsdf
 
     def _moment_collection_name(self) -> str:
-        raw = f"{self.dataset_id}_freq_{self.ds_freq}_pred_{self.ds_prediction_length}_win_{self.few_shot_len}"
-        # Sanitize to match Chroma's [a-zA-Z0-9._-], 3-512 chars, start/end alnum
+        """
+        Stable collection naming for persistent Chroma indices.
+        Only include parameters that affect the stored embeddings/windows, not retrieval-time knobs.
+
+        Components:
+        - dataset_id, ds_freq
+        - pred_len used for windowing
+        - moment_model_id (shortened) and moment_ctx_len (embedding window)
+        - index_step (stride) and index_tail_trim_multiple (leakage guard)
+        """
+        # Shorten model id to a compact, filename-safe token
+        model_tok = re.sub(r"[^a-zA-Z0-9]+", "_", str(self.moment_model_id)).strip("_")
+        if len(model_tok) > 40:
+            model_tok = model_tok[:40]
+        raw = (
+            f"ds_{self.dataset_id}_f_{self.ds_freq}_pred_{self.ds_prediction_length}"
+            f"_ctx_{int(self.moment_ctx_len)}_step_{int(self.index_step)}_trim_{int(self.index_tail_trim_multiple)}"
+            f"_model_{model_tok}"
+        )
+        # Sanitize to match Chroma constraints [a-zA-Z0-9._-], 3-512 chars, start/end alnum
         safe = re.sub(r"[^a-zA-Z0-9._-]", "_", raw)
         safe = safe.strip("._-")
         if not safe:
             safe = "ds"
-        # Ensure starts/ends with alnum
         if not re.match(r"^[a-zA-Z0-9]", safe):
             safe = f"d{safe}"
         if not re.search(r"[a-zA-Z0-9]$", safe):
             safe = f"{safe}0"
-        # Truncate to max length
         return safe[:200]
 
     def _moment_index_windows(self, train_tsdf_full: TimeSeriesDataFrame) -> None:
@@ -592,6 +609,22 @@ class TabPFNTSPredictor:
                 en_ts = ts_idx[s + win_len - 1]
                 uid = f"{self.dataset_id}::{str(item_id)}::{int(pd.Timestamp(st_ts).value)}::{int(pd.Timestamp(en_ts).value)}"
                 to_upsert_ids.append(uid)
+                # Compute horizon start/end timestamps (next P points after end)
+                hor_start_idx = s + win_len
+                hor_end_idx = s + (2 * win_len) - 1
+                # Bounds guard (should hold due to tail trim)
+                if hor_end_idx < len(ts_idx):
+                    hor_start_ts = ts_idx[hor_start_idx]
+                    hor_end_ts = ts_idx[hor_end_idx]
+                    hor_start_ts_int = int(pd.Timestamp(hor_start_ts).value)
+                    hor_end_ts_int = int(pd.Timestamp(hor_end_ts).value)
+                else:
+                    # Fallback: derive via freq offsets
+                    step = pd.tseries.frequencies.to_offset(self.ds_freq)
+                    hor_start_ts = pd.Timestamp(en_ts) + step
+                    hor_end_ts = pd.Timestamp(en_ts) + (win_len * step)
+                    hor_start_ts_int = int(hor_start_ts.value)
+                    hor_end_ts_int = int(hor_end_ts.value)
                 to_upsert_metas.append({
                     "dataset_id": self.dataset_id,
                     "item_id": str(item_id),
@@ -600,6 +633,10 @@ class TabPFNTSPredictor:
                     "start_ts_int": int(pd.Timestamp(st_ts).value),
                     "end_ts_int": int(pd.Timestamp(en_ts).value),
                     "length": int(win_len),
+                    "horizon_start_ts": str(pd.Timestamp(hor_start_ts)),
+                    "horizon_end_ts": str(pd.Timestamp(hor_end_ts)),
+                    "horizon_start_ts_int": hor_start_ts_int,
+                    "horizon_end_ts_int": hor_end_ts_int,
                 })
                 to_upsert_slices.append((item_id, s))
         if self.debug:
@@ -648,85 +685,12 @@ class TabPFNTSPredictor:
             for (uid, md), (iid_slice, s_start) in zip(zip(to_upsert_ids, to_upsert_metas), to_upsert_slices):
                 start_index_map[uid] = (iid_slice, s_start)
 
-            # Group missing pairs by item for GPU window extraction
-            grouped: Dict[object, List[Tuple[str, int]]] = {}
-            for uid, md in missing_pairs:
-                iid_slice, s_start = start_index_map[uid]
-                grouped.setdefault(iid_slice, []).append((uid, s_start))
-
             uid_to_vec: Dict[str, List[float]] = {}
 
-            try:
-                import torch
-                import torch.nn.functional as F  # noqa: F401
-                device = None
-                if self.moment_device:
-                    device = self.moment_device
-                elif self.moment_devices and len(self.moment_devices) > 0:
-                    device = self.moment_devices[0]
-                # GPU path if device is available
-                if device is not None:
-                    if self.debug:
-                        logger.info("[MOMENT] Index: GPU windowing on device %s", device)
-                    for iid_slice, entries in _tqdm(grouped.items(), disable=not use_pbar, desc="GPU windowing"):
-                        arr = arr_cache[iid_slice]
-                        x = torch.from_numpy(arr).to(device)
-                        # Make [1,1,1,N] for unfold
-                        x4 = x.view(1, 1, 1, -1)
-                        stride = self.index_step
-                        # Unfold to get windows with step=index_step
-                        patches = torch.nn.functional.unfold(x4, kernel_size=(1, win_len), stride=(1, stride))  # [1, win_len, num_w]
-                        patches = patches.squeeze(0).transpose(0, 1)  # [num_w, win_len]
-                        # Select needed starts (index in this tensor is s_start/stride)
-                        idxs = []
-                        uids = []
-                        for uid, s_start in entries:
-                            idxs.append(int(s_start // stride))
-                            uids.append(uid)
-                        idxs_t = torch.tensor(idxs, dtype=torch.long, device=device)
-                        sel = patches.index_select(0, idxs_t)  # [B, win_len]
-                        # Pad/truncate to moment_ctx_len on device
-                        L = int(self.moment_ctx_len)
-                        if win_len >= L:
-                            selL = sel[:, -L:]
-                        else:
-                            pad = torch.zeros((sel.shape[0], L - win_len), dtype=sel.dtype, device=device)
-                            selL = torch.cat([pad, sel], dim=1)
-                        # Embed in batches
-                        bs = max(1, self.moment_batch_size)
-                        total = selL.shape[0]
-                        for start in _tqdm(range(0, total, bs), disable=not use_pbar, desc="Embedding"):
-                            chunk = selL[start : start + bs]
-                            x_enc = chunk.unsqueeze(1)  # [B,1,L]
-                            with torch.no_grad():
-                                out = self._moment_pipeline(x_enc=x_enc)
-                            embs = out.embeddings.detach().cpu().numpy().tolist()
-                            for j, vec in enumerate(embs):
-                                uid = uids[start + j]
-                                uid_to_vec[uid] = vec
-                else:
-                    # CPU fallback: batch through existing _moment_embed_batch
-                    if self.debug:
-                        logger.info("[MOMENT] Index: CPU batching path")
-                    values_list: List[np.ndarray] = []
-                    uids: List[str] = []
-                    for iid_slice, entries in grouped.items():
-                        arr = arr_cache[iid_slice]
-                        for uid, s_start in entries:
-                            values_list.append(arr[s_start : s_start + win_len])
-                            uids.append(uid)
-                    total = len(values_list)
-                    bs = max(1, self.moment_batch_size)
-                    for start in _tqdm(range(0, total, bs), disable=not use_pbar, desc="CPU batching"):
-                        batch_vals = values_list[start : start + bs]
-                        batch_out = self._moment_embed_batch(batch_vals)
-                        for j, vec in enumerate(batch_out):
-                            uid = uids[start + j]
-                            uid_to_vec[uid] = vec
-            except Exception:
-                # Ultimate fallback: simple CPU path
+            # If multiple devices provided, shard embedding across them via _moment_embed_batch
+            if self.moment_devices and len(self.moment_devices) > 1:
                 if self.debug:
-                    logger.info("[MOMENT] Index: CPU fallback path (simple)")
+                    logger.info("[MOMENT] Index: Multi-GPU embedding via _moment_embed_batch on devices=%s", str(self.moment_devices))
                 values_list: List[np.ndarray] = []
                 uids: List[str] = []
                 for uid, md in missing_pairs:
@@ -736,12 +700,105 @@ class TabPFNTSPredictor:
                     uids.append(uid)
                 total = len(values_list)
                 bs = max(1, self.moment_batch_size)
-                for start in _tqdm(range(0, total, bs), disable=not use_pbar, desc="CPU fallback"):
+                for start in _tqdm(range(0, total, bs), disable=not use_pbar, desc="Multi-GPU embed"):
                     batch_vals = values_list[start : start + bs]
                     batch_out = self._moment_embed_batch(batch_vals)
                     for j, vec in enumerate(batch_out):
                         uid = uids[start + j]
                         uid_to_vec[uid] = vec
+            else:
+                # Prefer GPU windowing if a single device is set; otherwise fall back to CPU batching
+                try:
+                    import torch
+                    import torch.nn.functional as F  # noqa: F401
+                    device = None
+                    if self.moment_device:
+                        device = self.moment_device
+                    elif self.moment_devices and len(self.moment_devices) > 0:
+                        device = self.moment_devices[0]
+                    # GPU path if device is available
+                    if device is not None:
+                        # Group missing pairs by item for GPU window extraction
+                        grouped: Dict[object, List[Tuple[str, int]]] = {}
+                        for uid, md in missing_pairs:
+                            iid_slice, s_start = start_index_map[uid]
+                            grouped.setdefault(iid_slice, []).append((uid, s_start))
+                        if self.debug:
+                            logger.info("[MOMENT] Index: GPU windowing on device %s", device)
+                        for iid_slice, entries in _tqdm(grouped.items(), disable=not use_pbar, desc="GPU windowing"):
+                            arr = arr_cache[iid_slice]
+                            x = torch.from_numpy(arr).to(device)
+                            # Make [1,1,1,N] for unfold
+                            x4 = x.view(1, 1, 1, -1)
+                            stride = self.index_step
+                            # Unfold to get windows with step=index_step
+                            patches = torch.nn.functional.unfold(x4, kernel_size=(1, win_len), stride=(1, stride))  # [1, win_len, num_w]
+                            patches = patches.squeeze(0).transpose(0, 1)  # [num_w, win_len]
+                            # Select needed starts (index in this tensor is s_start/stride)
+                            idxs = []
+                            uids = []
+                            for uid, s_start in entries:
+                                idxs.append(int(s_start // stride))
+                                uids.append(uid)
+                            idxs_t = torch.tensor(idxs, dtype=torch.long, device=device)
+                            sel = patches.index_select(0, idxs_t)  # [B, win_len]
+                            # Pad/truncate to moment_ctx_len on device
+                            L = int(self.moment_ctx_len)
+                            if win_len >= L:
+                                selL = sel[:, -L:]
+                            else:
+                                pad = torch.zeros((sel.shape[0], L - win_len), dtype=sel.dtype, device=device)
+                                selL = torch.cat([pad, sel], dim=1)
+                            # Embed in batches
+                            bs = max(1, self.moment_batch_size)
+                            total = selL.shape[0]
+                            for start in _tqdm(range(0, total, bs), disable=not use_pbar, desc="Embedding"):
+                                chunk = selL[start : start + bs]
+                                x_enc = chunk.unsqueeze(1)  # [B,1,L]
+                                with torch.no_grad():
+                                    out = self._moment_pipeline(x_enc=x_enc)
+                                embs = out.embeddings.detach().cpu().numpy().tolist()
+                                for j, vec in enumerate(embs):
+                                    uid = uids[start + j]
+                                    uid_to_vec[uid] = vec
+                    else:
+                        # CPU batching path using _moment_embed_batch (single device or CPU)
+                        if self.debug:
+                            logger.info("[MOMENT] Index: CPU batching path")
+                        values_list: List[np.ndarray] = []
+                        uids: List[str] = []
+                        for uid, md in missing_pairs:
+                            iid_slice, s_start = start_index_map[uid]
+                            arr = arr_cache[iid_slice]
+                            values_list.append(arr[s_start : s_start + win_len])
+                            uids.append(uid)
+                        total = len(values_list)
+                        bs = max(1, self.moment_batch_size)
+                        for start in _tqdm(range(0, total, bs), disable=not use_pbar, desc="CPU batching"):
+                            batch_vals = values_list[start : start + bs]
+                            batch_out = self._moment_embed_batch(batch_vals)
+                            for j, vec in enumerate(batch_out):
+                                uid = uids[start + j]
+                                uid_to_vec[uid] = vec
+                except Exception:
+                    # Ultimate fallback: simple CPU path
+                    if self.debug:
+                        logger.info("[MOMENT] Index: CPU fallback path (simple)")
+                    values_list: List[np.ndarray] = []
+                    uids: List[str] = []
+                    for uid, md in missing_pairs:
+                        iid_slice, s_start = start_index_map[uid]
+                        arr = arr_cache[iid_slice]
+                        values_list.append(arr[s_start : s_start + win_len])
+                        uids.append(uid)
+                    total = len(values_list)
+                    bs = max(1, self.moment_batch_size)
+                    for start in _tqdm(range(0, total, bs), disable=not use_pbar, desc="CPU fallback"):
+                        batch_vals = values_list[start : start + bs]
+                        batch_out = self._moment_embed_batch(batch_vals)
+                        for j, vec in enumerate(batch_out):
+                            uid = uids[start + j]
+                            uid_to_vec[uid] = vec
 
             # Order embeddings to match missing_pairs
             to_upsert_vecs.extend([uid_to_vec[uid] for uid, _ in missing_pairs])
@@ -758,7 +815,41 @@ class TabPFNTSPredictor:
             vi += 1
 
         if final_ids:
-            self._chroma_collection.upsert(ids=final_ids, embeddings=to_upsert_vecs, metadatas=final_metas)  # type: ignore
+            # Upsert in chunks to respect Chroma's max batch size limits
+            # Start conservatively and shrink on errors
+            try:
+                from tqdm.auto import tqdm as _tqdm  # type: ignore
+                use_pbar = self.moment_progress
+            except Exception:
+                _tqdm = lambda x, **kwargs: x  # type: ignore
+                use_pbar = False
+
+            max_chunk = 5000
+            idx = 0
+            pbar = _tqdm(total=len(final_ids), disable=not use_pbar, desc="Chroma upsert")
+            while idx < len(final_ids):
+                end = min(idx + max_chunk, len(final_ids))
+                try:
+                    self._chroma_collection.upsert(  # type: ignore
+                        ids=final_ids[idx:end],
+                        embeddings=to_upsert_vecs[idx:end],
+                        metadatas=final_metas[idx:end],
+                    )
+                    if use_pbar:
+                        pbar.update(end - idx)
+                    idx = end
+                except Exception as e:
+                    if max_chunk <= 1:
+                        if use_pbar:
+                            pbar.close()
+                        raise
+                    # Reduce chunk size and retry
+                    max_chunk = max(1, max_chunk // 2)
+                    if self.debug:
+                        logger.warning("Chroma upsert failed: %s. Reducing chunk size to %d and retrying.", str(e), max_chunk)
+            if use_pbar:
+                pbar.close()
+
             if self.debug:
                 # Log approximate on-disk size of Chroma directory
                 try:
@@ -871,26 +962,66 @@ class TabPFNTSPredictor:
 
         outputs: List[List[float]] = [None] * len(proc)  # type: ignore
         if multi_devs:
-            # Round-robin assignment
+            # Round-robin assignment to devices
             shards: Dict[str, List[Tuple[int, np.ndarray]]] = {dev: [] for dev in multi_devs}
             for idx, arr_win in enumerate(proc):
                 dev = multi_devs[idx % len(multi_devs)]
                 shards[dev].append((idx, arr_win))
 
-            for dev, items in shards.items():
+            # Run per-device embedding concurrently
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            def _embed_device(dev: str, items: List[Tuple[int, np.ndarray]]):
                 if not items:
-                    continue
+                    return []
                 pipe = self._moment_pipelines.get(dev)
-                batch = torch.from_numpy(np.stack([a for _, a in items], axis=0))[:, None, :]
+                if pipe is None:
+                    # Fallback to single pipeline if multi not available
+                    self._ensure_moment_single_pipeline()
+                    return [(idx, vec) for idx, vec in enumerate(self._moment_embed_batch([a for _, a in items]))]
+                import torch as _torch
+
+                bs = max(1, self.moment_batch_size)
+                results: List[Tuple[int, List[float]]] = []
+                # Build big tensor per device to minimize host->device copies per chunk
+                arrs = [a for _, a in items]
+                x_all = _torch.from_numpy(np.stack(arrs, axis=0))[:, None, :]
                 try:
-                    batch = batch.to(dev)
+                    x_all = x_all.to(dev)
                 except Exception:
                     pass
-                with torch.no_grad():
-                    out = pipe(x_enc=batch)
-                embs = out.embeddings.detach().cpu().numpy()
-                for (idx, _), vec in zip(items, embs):
-                    outputs[idx] = vec.tolist()
+                total = x_all.shape[0]
+                for start_idx in range(0, total, bs):
+                    chunk = x_all[start_idx : start_idx + bs]
+                    with _torch.no_grad():
+                        out = pipe(x_enc=chunk)
+                    embs = out.embeddings.detach().cpu().numpy().tolist()
+                    for j, vec in enumerate(embs):
+                        orig_idx = items[start_idx + j][0]
+                        results.append((orig_idx, vec))
+                return results
+
+            futures = []
+            with ThreadPoolExecutor(max_workers=len(multi_devs)) as ex:
+                for dev, items in shards.items():
+                    futures.append(ex.submit(_embed_device, dev, items))
+                for fut in as_completed(futures):
+                    try:
+                        pairs = fut.result()
+                        for idx, vec in pairs:
+                            outputs[idx] = vec
+                    except Exception:
+                        # Best-effort; in case a device fails, leave entries None to be handled below
+                        pass
+
+            # Fallback for any missing outputs: compute on single pipeline
+            missing_idxs = [i for i, v in enumerate(outputs) if v is None]
+            if missing_idxs:
+                self._ensure_moment_single_pipeline()
+                batch_vals = [proc[i] for i in missing_idxs]
+                embs = self._moment_embed_batch(batch_vals)
+                for i, vec in zip(missing_idxs, embs):
+                    outputs[i] = vec
             return outputs
 
         # Single device path
@@ -989,16 +1120,27 @@ class TabPFNTSPredictor:
 
         for i, item in enumerate(test_data_input):
             target = item["target"]
+            # Normalize target to a 1D numpy array. Guard against scalars.
+            try:
+                target_arr = np.asarray(target)
+            except Exception:
+                target_arr = np.array([target])
+            if target_arr.ndim == 0:
+                # Scalar -> length-1 series
+                target_arr = np.array([target_arr.item()])
+            elif target_arr.ndim > 1:
+                # If multi-dim sneaks in, flatten along time dimension
+                target_arr = target_arr.reshape(-1)
 
             # Create timestamp index
             timestamp = pd.date_range(
                 start=item["start"].to_timestamp(),
-                periods=len(target),
+                periods=int(target_arr.shape[0]),
                 freq=item["freq"],
             )
 
             # Create DataFrame with target
-            df = pd.DataFrame({"target": target}, index=timestamp)
+            df = pd.DataFrame({"target": target_arr}, index=timestamp)
 
             # Create MultiIndex DataFrame
             time_series[i] = df.set_index(
