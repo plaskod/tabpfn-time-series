@@ -1,5 +1,18 @@
 # %%
 # VS Code Interactive Debug Script: MOMENT-based retrieval with ChromaDB
+# This interactive script walks through the preprocessing and MOMENT+ChromaDB
+# retrieval flow used by `TabPFNTSPredictor`.
+# Steps overview:
+# 1) Load dataset metadata.
+# 2) Normalize GluonTS test entries into list[dict] for the wrapper.
+# 3) Build a raw `TimeSeriesDataFrame` for reconstruction/plots.
+# 4) Run baseline preprocessing (no retrieval).
+# 5) Run MOMENT retrieval: for each query, append support segments composed of
+#    P points from the retrieved window + P following horizon (P=prediction_length),
+#    re-attributed to the querying item_id; segments get unique `segment_id`s
+#    so featurization stays independent per segment.
+# 6) Inspect captured retrieval metadata.
+# 7) Plot baseline context, retrieved windows (solid), and horizons (dashed).
 
 from pathlib import Path
 import sys
@@ -21,6 +34,7 @@ from tabpfn_time_series.ts_dataframe import TimeSeriesDataFrame
 
 
 def section(title: str):
+    # Pretty step header printer for readability in the interactive output
     print("\n" + "=" * 80)
     print(title)
     print("=" * 80)
@@ -54,6 +68,8 @@ RETRIEVAL_SEPARATION_LEN = 0  # timesteps; set >0 to enforce spacing between ret
 
 # %%
 section("Step 1: Load dataset and basic metadata")
+# - `to_univariate=True` ensures each series is 1D
+# - Provides `freq`, `prediction_length`, `windows`, etc.
 ds = Dataset(
     name=DATASET_NAME,
     term=TERM,
@@ -77,6 +93,8 @@ print({
 
 
 section("Step 2: Convert GluonTS TestData → list[dict] (wrapper input)")
+# GluonTS yields tuples in some datasets; normalize to a list of dicts with
+# keys: 'target', 'start', 'freq' expected by the wrapper.
 test_data_input: List[Dict[str, Any]] = []
 for entry in ds.test_data:
     item = entry[0] if isinstance(entry, tuple) else entry
@@ -93,6 +111,8 @@ print(f"test_data_input size: {len(test_data_input)}")
 
 # %%
 section("Step 3: Build train_tsdf_full (raw)")
+# Raw TSDF without features; used here only for reconstructing/plotting
+# retrieved segments by timestamp ranges.
 train_tsdf_full = TabPFNTSPredictor.convert_to_timeseries_dataframe(test_data_input)
 print("train_tsdf_full: rows=", len(train_tsdf_full), "items=", len(train_tsdf_full.item_ids))
 print("train_tsdf_full head:\n", train_tsdf_full.head())
@@ -103,6 +123,10 @@ print("train_tsdf_full head:\n", train_tsdf_full.head())
 
 # %%
 section("Step 4: Baseline preprocessing (no retrieval)")
+# Internally:
+#  - Slices each item to last `context_length` timestamps as the context
+#  - Generates test horizon of length `prediction_length`
+#  - Marks baseline rows as `segment_id=0` and applies feature transforms
 predictor_base = TabPFNTSPredictor(
     ds_prediction_length=ds.prediction_length,
     ds_freq=ds.freq,
@@ -129,6 +153,13 @@ print({
 print("MOMENT_DEVICE", MOMENT_DEVICE)
 # %%
 section("Step 5: Preprocessing with MOMENT retrieval (few-shot augmentation)")
+# Internally:
+#  - Build/refresh a ChromaDB index of eligible windows with MOMENT embeddings
+#  - For each query, retrieve top_k windows ending strictly before the query start
+#  - For each, create support segment = P window tail + P following horizon
+#    (P=prediction_length), re-attributed to the querying item_id
+#  - Assign unique `segment_id` per support to keep features independent
+#  - Log metadata under `_last_retrieval_info` for debugging/plots
 predictor_moment = TabPFNTSPredictor(
     ds_prediction_length=ds.prediction_length,
     ds_freq=ds.freq,
@@ -169,6 +200,8 @@ print("Per-item added rows head::\n", delta_per_item.head(10))
 
 # %%
 section("Step 6: Retrieved windows metadata")
+# Each metadata dict contains: item_id (source), start_ts, end_ts,
+# horizon_end_ts, and similarity distance.
 retrieval_info = getattr(predictor_moment, "_last_retrieval_info", {})
 if not retrieval_info:
     print("No retrieval info (few_shot_k may be 0 or insufficient history).")
@@ -185,6 +218,7 @@ else:
 
 # %%
 section("Step 6a: Item inventory and counts")
+# Quick sanity check of per-item lengths in the raw input TSDF.
 uniq_items = list(train_tsdf_full.item_ids)
 print("Num items:", len(uniq_items))
 sizes = train_tsdf_full.groupby(level="item_id").size().sort_values(ascending=False)
@@ -196,6 +230,8 @@ print("Per-item lengths (top 10):\n", sizes.head(10))
 
 # %%
 section("Step 6b: Inspect Chroma query and item_id metadatas")
+# Re-run a sample Chroma query to inspect retrieved metadatas and distances.
+# Helps verify where filter and retrieval scope.
 if len(train_mom.item_ids):
     sample_item = int(list(retrieval_info.keys())[0]) if retrieval_info else train_mom.item_ids[0]
     pred_len = ds.prediction_length
@@ -238,6 +274,9 @@ if len(train_mom.item_ids):
 
 # %%
 section("Step 7: Plot baseline context + retrieved windows")
+# - Baseline context: dark solid line
+# - Retrieved windows: solid colored lines
+# - Horizons: dashed lines with same colors
 if len(train_mom.item_ids):
     sample_item = (
         delta_per_item.index[0]
@@ -267,6 +306,19 @@ if len(train_mom.item_ids):
             seg_len = len(ts_seg)
             lbl = f"retrieved #{j+1} (len={seg_len}, d={md.get('distance', None)})"
             plt.plot(ts_seg, y_seg, color=cmap((j + 1) % 10), alpha=0.9, label=lbl)
+
+            # Plot dashed horizon following the retrieved subsequence if present
+            h_end = md.get("horizon_end_ts")
+            if h_end is not None:
+                try:
+                    h_end_ts = pd.Timestamp(h_end)
+                    # Build horizon timestamps at dataset frequency
+                    hor_ts = pd.date_range(start=ts_seg[-1], periods=2, freq=ds.freq)[1:]
+                    hor_ts = pd.date_range(start=hor_ts[0], end=h_end_ts, freq=ds.freq)
+                    hor_vals = full_df.loc[hor_ts, "target"].to_numpy()
+                    plt.plot(hor_ts, hor_vals, color=cmap((j + 1) % 10), linestyle="--", alpha=0.9, label=f"horizon #{j+1}")
+                except Exception:
+                    pass
 
     plt.title("MOMENT cosine retrieval: baseline context + top-k windows")
     plt.legend()

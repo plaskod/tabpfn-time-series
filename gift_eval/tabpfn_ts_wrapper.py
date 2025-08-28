@@ -374,6 +374,7 @@ class TabPFNTSPredictor:
         q_ids: List[str] = []
         q_vecs: List[List[float]] = []
         q_meta: List[Dict] = []
+        q_targets: List[object] = []
         for item_id, q_df in queries_tsdf.groupby(level="item_id", sort=False):
             q_vec = self._moment_embed_series(q_df.target.values)
             q_ids.append(f"query::{self.dataset_id}::{str(item_id)}")
@@ -384,6 +385,7 @@ class TabPFNTSPredictor:
                 "item_id": str(item_id),
                 "q_start_ts_int": int(q_start_ts.value),
             })
+            q_targets.append(item_id)
 
         # Perform per-item or global queries and collect top-k windows
         support_segments: List[pd.DataFrame] = []
@@ -452,22 +454,47 @@ class TabPFNTSPredictor:
                                 continue
                         full_df = train_tsdf_full.loc[iid]
                         window_df = full_df.loc[st:en, :].copy()
-                        if not isinstance(window_df.index, pd.MultiIndex):
-                            window_df.index = pd.MultiIndex.from_product(
-                                [[iid], window_df.index], names=["item_id", "timestamp"]
-                            )
+                        # Reassign support window to the QUERY's item_id to extend its context, not the source iid
+                        target_item_id = q_targets[i]
+                        ts_vals = window_df.index if not isinstance(window_df.index, pd.MultiIndex) else window_df.index.get_level_values("timestamp")
+                        window_df.index = pd.MultiIndex.from_product(
+                            [[target_item_id], ts_vals], names=["item_id", "timestamp"]
+                        )
                         if len(window_df) < self.ds_prediction_length:
                             continue
+                        # Use exactly prediction_length rows (context-like part)
                         window_df = window_df.iloc[-self.ds_prediction_length :]
+
+                        # Build following horizon of length prediction_length from the source series
+                        try:
+                            # position of 'en' in source df
+                            end_pos = full_df.index.get_loc(en)
+                            horizon_df = full_df.iloc[end_pos + 1 : end_pos + 1 + self.ds_prediction_length].copy()
+                        except Exception:
+                            horizon_df = full_df.loc[en + pd.tseries.frequencies.to_offset(self.ds_freq) : en + self.ds_prediction_length * pd.tseries.frequencies.to_offset(self.ds_freq)].copy()
+                        # Guard: require full horizon length and ensure horizon end < query start to avoid leakage
+                        if len(horizon_df) < self.ds_prediction_length:
+                            continue
+                        horizon_end_ts = horizon_df.index[-1]
+                        if int(pd.Timestamp(horizon_end_ts).value) >= q_meta[i]["q_start_ts_int"]:
+                            continue
+                        # Reassign horizon to the query item_id with same timestamps
+                        h_ts_vals = horizon_df.index if not isinstance(horizon_df.index, pd.MultiIndex) else horizon_df.index.get_level_values("timestamp")
+                        horizon_df.index = pd.MultiIndex.from_product(
+                            [[target_item_id], h_ts_vals], names=["item_id", "timestamp"]
+                        )
+                        # Combine context-like and horizon into single support segment
+                        support_df = pd.concat([window_df, horizon_df]).sort_index()
                         kept_starts.append(st_int)
                         kept_j += 1
-                        window_df["segment_id"] = kept_j
-                        support_segments.append(window_df)
+                        support_df["segment_id"] = kept_j
+                        support_segments.append(support_df)
                         self._last_retrieval_info.setdefault(str(q_meta[i]["item_id"]), []).append(
                             {
                                 "item_id": str(iid),
                                 "start_ts": str(st),
                                 "end_ts": str(en),
+                                "horizon_end_ts": str(horizon_end_ts),
                                 "distance": float(dists[j]) if j < len(dists) else None,
                             }
                         )
