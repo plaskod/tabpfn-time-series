@@ -364,8 +364,8 @@ print({"items": len(sizes), "min_len": int(sizes.min()), "max_len": int(sizes.ma
 
 # %%
 summary = vectorize_dataset_db(
-  "bizitobs_l2c/H", "short",
-  context_length=48,              # optional; used only for predictor’s ctx (not embedding)
+  "bizitobs_service", "short",
+  context_length=60,              # optional; used only for predictor’s ctx (not embedding)
   chroma_db_dir=CHROMA_DB_DIR,    # or custom Path
   moment_ctx_len=0,               # 0 => adopt P
   moment_devices=["cuda:0","cuda:1","cuda:2","cuda:3"],
@@ -378,6 +378,11 @@ summary = vectorize_dataset_db(
 )
 print(summary)
 
+
+# %%
+import chromadb
+client = chromadb.PersistentClient(path="/home/dplaskow/pfn-gift-eval/tabpfn-time-series/gift_eval/.moment_chroma")
+[x.name for x in client.list_collections()]
 # %% [markdown]
 # Query existing index directly: demonstrate where filters by timestamps and item_id
 
